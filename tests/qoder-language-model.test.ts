@@ -150,10 +150,11 @@ describe('QoderLanguageModel', () => {
       const text = textDeltas.map((p: any) => p.delta).join('')
       expect(text).toBe('Done!')
 
-      // 工具调用也应该出现
+      // 工具调用也应该出现，并标记为 providerExecuted，避免 opencode 重复执行
       const toolStart = parts.find((p: any) => p.type === 'tool-input-start')
       expect(toolStart).toBeDefined()
-      expect(toolStart.toolName).toBe('Bash')
+      expect(toolStart.toolName).toBe('bash')
+      expect(toolStart.providerExecuted).toBe(true)
     })
 
     it('result success 输出 finish 事件', async () => {
@@ -208,8 +209,8 @@ describe('QoderLanguageModel', () => {
       expect(finish.finishReason).toBe('error')
     })
 
-    it('assistant 消息 tool_use block 输出 tool-input-start 和 tool-input-delta', async () => {
-      // SDK 实际场景：assistant 消息包含 tool_use block
+    it('assistant 消息 tool_use block 输出完整工具调用链，且标记 providerExecuted', async () => {
+      // SDK 实际场景：assistant 消息包含 tool_use block，后面 user 消息带 tool_result
       mockQueryMessages.push({
         type: 'assistant',
         uuid: 'uuid-1',
@@ -225,6 +226,16 @@ describe('QoderLanguageModel', () => {
               input: { command: 'ls -la' },
             },
           ],
+        },
+      })
+      mockQueryMessages.push({
+        type: 'user',
+        uuid: 'uuid-1b',
+        session_id: 'sess-1',
+        parent_tool_use_id: null,
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_abc123', content: 'total 0\n' }],
         },
       })
       mockQueryMessages.push({
@@ -250,12 +261,173 @@ describe('QoderLanguageModel', () => {
       const toolStart = parts.find((p: any) => p.type === 'tool-input-start')
       expect(toolStart).toBeDefined()
       expect(toolStart.id).toBe('toolu_abc123')
-      expect(toolStart.toolName).toBe('Bash')
+      expect(toolStart.toolName).toBe('bash')
+      expect(toolStart.providerExecuted).toBe(true)
 
       const toolDeltas = parts.filter((p: any) => p.type === 'tool-input-delta')
       expect(toolDeltas.length).toBe(1)
       const parsed = JSON.parse(toolDeltas[0].delta)
       expect(parsed.command).toBe('ls -la')
+
+      const toolEnd = parts.find((p: any) => p.type === 'tool-input-end')
+      expect(toolEnd).toBeDefined()
+      expect(toolEnd.id).toBe('toolu_abc123')
+
+      const toolCall = parts.find((p: any) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect(toolCall.toolCallId).toBe('toolu_abc123')
+      expect(toolCall.toolName).toBe('bash')
+      expect(toolCall.providerExecuted).toBe(true)
+      const inputParsed = JSON.parse(toolCall.input)
+      expect(inputParsed.command).toBe('ls -la')
+
+      const toolResult = parts.find((p: any) => p.type === 'tool-result')
+      expect(toolResult).toBeDefined()
+      expect(toolResult.toolCallId).toBe('toolu_abc123')
+      expect(toolResult.toolName).toBe('bash')
+      expect(toolResult.providerExecuted).toBe(true)
+      expect(toolResult.result).toEqual({
+        output: 'total 0\n',
+        title: 'bash',
+        metadata: {},
+      })
+
+      const idxStart = parts.findIndex((p: any) => p.type === 'tool-input-start')
+      const idxDelta = parts.findIndex((p: any) => p.type === 'tool-input-delta')
+      const idxEnd = parts.findIndex((p: any) => p.type === 'tool-input-end')
+      const idxCall = parts.findIndex((p: any) => p.type === 'tool-call')
+      const idxResult = parts.findIndex((p: any) => p.type === 'tool-result')
+      expect(idxStart).toBeLessThan(idxDelta)
+      expect(idxDelta).toBeLessThan(idxEnd)
+      expect(idxEnd).toBeLessThan(idxCall)
+      expect(idxCall).toBeLessThan(idxResult)
+    })
+
+    it('stream_event 路径 tool_use block 输出完整工具调用链和 providerExecuted', async () => {
+      // 流式路径：SDK 发送 content_block_start/delta/stop 事件
+      mockQueryMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_stream1', name: 'Read', input: {} },
+        },
+      })
+      mockQueryMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{"path":"/tmp"}' },
+        },
+      })
+      mockQueryMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockQueryMessages.push({
+        type: 'user',
+        uuid: 'uuid-u',
+        session_id: 'sess-1',
+        parent_tool_use_id: null,
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_stream1', content: 'file body' }],
+        },
+      })
+      mockQueryMessages.push({
+        type: 'result',
+        subtype: 'success',
+        uuid: 'uuid-r',
+        session_id: 'sess-1',
+        result: '',
+        duration_ms: 100,
+        duration_api_ms: 80,
+        is_error: false,
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+      })
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(buildCallOptions('read file'))
+      const parts = await collectStream(stream)
+
+      const toolEnd = parts.find((p: any) => p.type === 'tool-input-end')
+      expect(toolEnd).toBeDefined()
+      expect(toolEnd.id).toBe('toolu_stream1')
+
+      const toolCall = parts.find((p: any) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect(toolCall.toolCallId).toBe('toolu_stream1')
+      expect(toolCall.toolName).toBe('read')
+      expect(toolCall.providerExecuted).toBe(true)
+
+      const toolResult = parts.find((p: any) => p.type === 'tool-result')
+      expect(toolResult).toBeDefined()
+      expect(toolResult.toolCallId).toBe('toolu_stream1')
+      expect(toolResult.toolName).toBe('read')
+      expect(toolResult.providerExecuted).toBe(true)
+      expect(toolResult.result).toEqual({
+        output: 'file body',
+        title: 'read',
+        metadata: {},
+      })
+    })
+
+    it('AskUserQuestion 会规范为 question', async () => {
+      mockQueryMessages.push({
+        type: 'assistant',
+        uuid: 'uuid-q1',
+        session_id: 'sess-q',
+        parent_tool_use_id: null,
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_question1',
+              name: 'AskUserQuestion',
+              input: { question: '继续吗？' },
+            },
+          ],
+        },
+      })
+      mockQueryMessages.push({
+        type: 'user',
+        uuid: 'uuid-q2',
+        session_id: 'sess-q',
+        parent_tool_use_id: null,
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_question1', content: '好的' }],
+        },
+      })
+      mockQueryMessages.push({
+        type: 'result',
+        subtype: 'success',
+        uuid: 'uuid-q3',
+        session_id: 'sess-q',
+        result: '',
+        duration_ms: 10,
+        duration_api_ms: 8,
+        is_error: false,
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+      })
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(buildCallOptions('ask user'))
+      const parts = await collectStream(stream)
+
+      const toolCall = parts.find((p: any) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect(toolCall.toolName).toBe('question')
     })
 
     it('system init 消息被忽略（不产生输出）', async () => {

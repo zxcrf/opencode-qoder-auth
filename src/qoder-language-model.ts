@@ -3,19 +3,11 @@ import type {
   LanguageModelV2CallOptions,
   LanguageModelV2Content,
   LanguageModelV2FinishReason,
+  LanguageModelV2StreamPart,
   LanguageModelV2Usage,
   ProviderV2,
 } from '@ai-sdk/provider'
 
-// LanguageModelV2 流式协议 part 类型（@ai-sdk/provider v1.x 尚未导出 V2 StreamPart）
-type V2StreamPart =
-  | { type: 'text-start'; id: string }
-  | { type: 'text-delta'; id: string; delta: string }
-  | { type: 'text-end'; id: string }
-  | { type: 'tool-input-start'; id: string; toolName: string }
-  | { type: 'tool-input-delta'; id: string; delta: string }
-  | { type: 'finish'; finishReason: LanguageModelV2FinishReason; usage: LanguageModelV2Usage }
-  | { type: 'error'; error: unknown }
 import { query } from './vendor/qoder-agent-sdk.mjs'
 import type { SDKMessage } from './vendor/qoder-agent-sdk.mjs'
 import { existsSync, readdirSync } from 'fs'
@@ -108,7 +100,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
   }
 
   async doStream(options: LanguageModelV2CallOptions): Promise<{
-    stream: ReadableStream<V2StreamPart>
+    stream: ReadableStream<LanguageModelV2StreamPart>
   }> {
     const prompt = buildPromptFromOptions(options)
 
@@ -124,79 +116,149 @@ export class QoderLanguageModel implements LanguageModelV2 {
       },
     })
 
-    const stream = new ReadableStream<V2StreamPart>({
+    const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start: async (controller) => {
         try {
           let hasFinish = false
-          // 每个 assistant text block 独立编号，支持多轮 assistant 消息
           let textBlockCounter = 0
-          // stream_event 路径是否已经输出过文本（防止 assistant 路径重复）
-          let streamEventTextEmitted = false
-          // stream_event 工具调用追踪：记录已发过 tool-input-start 的 block index → id 映射
-          const toolBlockIndexToId = new Map<number, string>()
+          let sawStreamEventText = false
+          let sawStreamEventTool = false
+          const activeStreamTextBlocks = new Set<number>()
+          const streamToolBlocks = new Map<number, { id: string; name: string; input: string }>()
+          const pendingToolCalls = new Map<string, { toolName: string; input: string }>()
 
           for await (const msg of qoderQuery) {
-            // 路径 A：stream_event（流式模式，CLI 启用 --stream 时）
-            // 实时转发增量文本和工具调用片段
             if (msg.type === 'stream_event') {
               const ev = msg.event
+
               if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
-                // 工具调用开始：登记 block index → tool id
-                toolBlockIndexToId.set(ev.index, ev.content_block.id)
+                sawStreamEventTool = true
+                const toolName = normalizeToolName(ev.content_block.name)
+                streamToolBlocks.set(ev.index, {
+                  id: ev.content_block.id,
+                  name: toolName,
+                  input: '',
+                })
                 controller.enqueue({
                   type: 'tool-input-start',
                   id: ev.content_block.id,
-                  toolName: ev.content_block.name,
+                  toolName,
+                  providerExecuted: true,
                 })
               } else if (ev.type === 'content_block_delta') {
                 if (ev.delta.type === 'text_delta' && ev.delta.text) {
-                  // 增量文本：每次 delta 共用同一个 text block id（以 block index 为 key）
+                  sawStreamEventText = true
                   const textId = String(ev.index ?? 0)
-                  if (!streamEventTextEmitted) {
+                  if (!activeStreamTextBlocks.has(ev.index)) {
+                    activeStreamTextBlocks.add(ev.index)
                     controller.enqueue({ type: 'text-start', id: textId })
                   }
                   controller.enqueue({ type: 'text-delta', id: textId, delta: ev.delta.text })
-                  streamEventTextEmitted = true
                 } else if (ev.delta.type === 'input_json_delta' && ev.delta.partial_json != null) {
-                  // 工具调用输入片段
-                  const toolId = toolBlockIndexToId.get(ev.index)
-                  if (toolId) {
-                    controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: ev.delta.partial_json })
+                  const toolBlock = streamToolBlocks.get(ev.index)
+                  if (toolBlock) {
+                    toolBlock.input += ev.delta.partial_json
+                    controller.enqueue({
+                      type: 'tool-input-delta',
+                      id: toolBlock.id,
+                      delta: ev.delta.partial_json,
+                    })
                   }
                 }
               } else if (ev.type === 'content_block_stop') {
-                // 文本 block 结束
-                const textId = String(ev.index ?? 0)
-                if (streamEventTextEmitted && !toolBlockIndexToId.has(ev.index)) {
+                const toolBlock = streamToolBlocks.get(ev.index)
+                if (toolBlock) {
+                  controller.enqueue({ type: 'tool-input-end', id: toolBlock.id })
+                  controller.enqueue({
+                    type: 'tool-call',
+                    toolCallId: toolBlock.id,
+                    toolName: toolBlock.name,
+                    input: toolBlock.input,
+                    providerExecuted: true,
+                  })
+                  pendingToolCalls.set(toolBlock.id, {
+                    toolName: toolBlock.name,
+                    input: toolBlock.input,
+                  })
+                  streamToolBlocks.delete(ev.index)
+                } else if (activeStreamTextBlocks.has(ev.index)) {
+                  const textId = String(ev.index ?? 0)
                   controller.enqueue({ type: 'text-end', id: textId })
+                  activeStreamTextBlocks.delete(ev.index)
                 }
               }
             }
 
-            // 路径 B：assistant 消息（--print 模式，Qoder CLI 实际行为）
-            // 只在 stream_event 路径没有输出文本时作为 fallback（防止重复）
             if (msg.type === 'assistant') {
               for (const block of msg.message.content) {
-                if (block.type === 'text' && block.text && !streamEventTextEmitted) {
-                  // fallback：stream_event 没发文本，从 assistant 消息提取
+                if (block.type === 'text' && block.text && !sawStreamEventText) {
                   const textId = String(textBlockCounter++)
                   controller.enqueue({ type: 'text-start', id: textId })
                   controller.enqueue({ type: 'text-delta', id: textId, delta: block.text })
                   controller.enqueue({ type: 'text-end', id: textId })
-                } else if (block.type === 'tool_use' && !toolBlockIndexToId.size) {
-                  // fallback：stream_event 没发工具调用，从 assistant 消息提取
-                  controller.enqueue({ type: 'tool-input-start', id: block.id, toolName: block.name })
+                } else if (block.type === 'tool_use' && !sawStreamEventTool) {
+                  const toolName = normalizeToolName(block.name)
+                  const inputJson = JSON.stringify(block.input ?? {})
+                  controller.enqueue({
+                    type: 'tool-input-start',
+                    id: block.id,
+                    toolName,
+                    providerExecuted: true,
+                  })
                   controller.enqueue({
                     type: 'tool-input-delta',
                     id: block.id,
-                    delta: JSON.stringify(block.input ?? {}),
+                    delta: inputJson,
                   })
+                  controller.enqueue({ type: 'tool-input-end', id: block.id })
+                  controller.enqueue({
+                    type: 'tool-call',
+                    toolCallId: block.id,
+                    toolName,
+                    input: inputJson,
+                    providerExecuted: true,
+                  })
+                  pendingToolCalls.set(block.id, { toolName, input: inputJson })
                 }
+              }
+            }
+
+            if (msg.type === 'user') {
+              for (const block of msg.message.content) {
+                if (block.type !== 'tool_result') continue
+                const toolCall = pendingToolCalls.get(block.tool_use_id)
+                if (!toolCall) continue
+
+                controller.enqueue({
+                  type: 'tool-result',
+                  toolCallId: block.tool_use_id,
+                  toolName: toolCall.toolName,
+                  result: normalizeToolResultContent(toolCall.toolName, block.content),
+                  providerExecuted: true,
+                })
+                pendingToolCalls.delete(block.tool_use_id)
               }
             }
 
             const finish = extractFinish(msg)
             if (finish) {
+              for (const [toolCallId, toolCall] of pendingToolCalls) {
+                controller.enqueue({
+                  type: 'tool-result',
+                  toolCallId,
+                  toolName: toolCall.toolName,
+                  result: normalizeToolResultContent(toolCall.toolName, null),
+                  providerExecuted: true,
+                })
+              }
+              pendingToolCalls.clear()
+              for (const index of streamToolBlocks.keys()) {
+                streamToolBlocks.delete(index)
+              }
+              for (const index of activeStreamTextBlocks) {
+                controller.enqueue({ type: 'text-end', id: String(index) })
+              }
+              activeStreamTextBlocks.clear()
               controller.enqueue(finish)
               hasFinish = true
             }
@@ -241,7 +303,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
 /**
  * 从一条 SDKMessage 中提取 finish part（仅 result 消息会产生）
  */
-function extractFinish(msg: SDKMessage): Extract<V2StreamPart, { type: 'finish' }> | null {
+function extractFinish(msg: SDKMessage): Extract<LanguageModelV2StreamPart, { type: 'finish' }> | null {
   if (msg.type !== 'result') return null
   const inputTokens = msg.usage?.input_tokens ?? 0
   const outputTokens = msg.usage?.output_tokens ?? 0
@@ -256,10 +318,28 @@ function extractFinish(msg: SDKMessage): Extract<V2StreamPart, { type: 'finish' 
   }
 }
 
+function normalizeToolName(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower === 'askuserquestion') return 'question'
+  return lower
+}
+
+function normalizeToolResultContent(toolName: string, content: unknown): {
+  output: string
+  title: string
+  metadata: Record<string, unknown>
+} {
+  return {
+    output: typeof content === 'string' ? content : JSON.stringify(content ?? null, null, 2),
+    title: toolName,
+    metadata: {},
+  }
+}
+
 /**
  * 从一条 SDKMessage 中提取 error part（暂无 Qoder SDK 错误消息类型）
  */
-function extractError(_msg: SDKMessage): Extract<V2StreamPart, { type: 'error' }> | null {
+function extractError(_msg: SDKMessage): Extract<LanguageModelV2StreamPart, { type: 'error' }> | null {
   return null
 }
 
