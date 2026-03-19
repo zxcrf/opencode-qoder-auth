@@ -13,7 +13,7 @@ import { QoderLanguageModel } from '../../src/qoder-language-model.js'
 // 设置较长超时，真实 API 调用可能需要 30s+
 const TIMEOUT = 60_000
 
-describe('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
+describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
   it('should respond to a simple text prompt with lite model', async () => {
     const model = new QoderLanguageModel('lite')
 

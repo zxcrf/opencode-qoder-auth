@@ -79,6 +79,19 @@ The plugin reads `~/.qoder/.auth/user` to detect login state. If not logged in, 
 
 ---
 
+### Known Limitations
+
+- Image / multimodal input is **not working yet** through the current opencode → provider → qoder SDK streaming path.
+- Although `qodercli --attachment` works in direct CLI usage, the current SDK streaming query path does not deliver the image to the model correctly.
+- `attachment` in model definitions currently reflects model-side capability only, and should not be interpreted as end-to-end image support in this plugin.
+
+### TODO
+
+- Investigate and fix image input support for the streaming SDK path used by this plugin.
+- Re-enable multimodal support only after end-to-end verification passes in opencode.
+
+---
+
 ### Troubleshooting
 
 | Problem | Solution |
@@ -165,6 +178,19 @@ opencode -m qoder/auto
 ### 认证说明
 
 插件通过检查 `~/.qoder/.auth/user` 判断登录状态。若未登录，opencode 会弹出提示：*先在终端运行 `qoder login`*。
+
+---
+
+### 已知限制
+
+- 当前图片 / 多模态输入**尚未打通** opencode → provider → qoder SDK 这条 streaming 调用链路。
+- 虽然 `qodercli --attachment` 直接调用时可用，但当前插件使用的 SDK streaming query 路径仍无法把图片真正传给模型。
+- 模型定义中的 `attachment` 字段目前仅表示模型侧能力声明，不代表本插件已经实现端到端图片支持。
+
+### TODO
+
+- 继续排查并修复本插件所使用的 SDK streaming 路径中的图片输入支持。
+- 只有在 opencode 端到端验证通过后，再重新启用 README 中的多模态支持声明。
 
 ---
 

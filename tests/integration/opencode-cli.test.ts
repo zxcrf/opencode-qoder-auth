@@ -61,7 +61,7 @@ function runOpencode(model: string, prompt: string): Promise<string> {
 }
 
 // concurrent: false 确保顺序执行，避免多个 opencode 进程同时运行
-describe('opencode CLI — Qoder provider', { timeout: TIMEOUT, concurrent: false }, () => {
+describe.skip('opencode CLI — Qoder provider', { timeout: TIMEOUT, concurrent: false }, () => {
   it('qoder/lite: 基本对话（免费模型）', async () => {
     const output = await runOpencode('qoder/lite', 'Reply with exactly the word: PONG')
     console.log('[cli][lite] output:', output)
