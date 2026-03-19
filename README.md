@@ -1,275 +1,335 @@
-# Opencode Qoder Provider
+# opencode-qoder-provider
 
 [English](#english) | [中文](#中文)
+
+> An [opencode](https://opencode.ai) plugin that brings **Qoder AI** models into your terminal — fully bundled, no internal registries required.
 
 ---
 
 <a name="english"></a>
 ## English
 
-Opencode plugin for Qoder AI provider. This plugin integrates Qoder AI models into the Opencode CLI, allowing you to use Qoder's powerful AI capabilities directly from your command line.
-
 ### Features
 
-- Multiple Qoder AI models (Auto, Efficient, Performance, Ultimate, Lite, and more)
-- Streaming response support
-- Tool calling capabilities
-- Image/multimodal input support
-- Fully bundled SDK (no external dependencies on `@ali/qoder-agent-sdk`)
+- 10 Qoder AI models: Auto, Efficient, Performance, Ultimate, Lite, Qwen-Coder, Qwen3.5-Plus, GLM-5, Kimi-K2.5, MiniMax-M2.7
+- Streaming response support (AI SDK V2 protocol)
+- Tool calling & multimodal (image) input
+- **Fully vendored SDK** — zero dependency on internal `@ali/qoder-agent-sdk` registry
+
+---
 
 ### Prerequisites
 
-Before using this plugin, you need to:
+#### 1. Install Qoder CLI
 
-1. **Install Qoder CLI**
-   ```bash
-   # Install via npm (recommended)
-   npm install -g @ali/qoder-cli
+Download and install the Qoder CLI from the official site:
 
-   # Or install via bun
-   bun install -g @ali/qoder-cli
-   ```
+```bash
+# macOS / Linux — download the latest binary from https://qoder.com/download
+# or install via npm if available on your registry:
+npm install -g @ali/qoder-cli
+```
 
-2. **Login to Qoder**
-   ```bash
-   qoder login
-   ```
-   This will open a browser window for authentication. Follow the prompts to complete the login.
+After installation, verify:
 
-3. **Verify installation**
-   ```bash
-   qoder --version
-   ```
+```bash
+qoder --version
+```
+
+The CLI binary will be placed at `~/.qoder/bin/qodercli/qodercli-<version>`.
+
+#### 2. Login to Qoder
+
+```bash
+qoder login
+```
+
+This opens a browser window for authentication. Complete the OAuth flow. Credentials are stored at `~/.qoder/.auth/user`.
+
+#### 3. Install opencode
+
+```bash
+npm install -g opencode-ai
+# or
+bun install -g opencode-ai
+```
+
+---
 
 ### Installation
 
-#### As an Opencode Plugin
+```bash
+git clone https://github.com/yee88/opencode-qoder-provider.git
+cd opencode-qoder-provider
+npm install
+```
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/yee88/opencode-qoder-provider.git
-   cd opencode-qoder-provider
-   ```
+---
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+### Configuration
 
-3. Link or copy the plugin to your Opencode plugins directory:
-   ```bash
-   # Option 1: Create a symlink (recommended for development)
-   ln -s $(pwd) ~/.config/opencode/plugins/opencode-qoder-provider
+Add the plugin to your opencode config at `~/.config/opencode/opencode.json`:
 
-   # Option 2: Copy the directory
-   cp -r . ~/.config/opencode/plugins/opencode-qoder-provider
-   ```
+```json
+{
+  "plugins": [
+    {
+      "npm": "file:///absolute/path/to/opencode-qoder-provider"
+    }
+  ],
+  "provider": {
+    "qoder": {
+      "name": "Qoder",
+      "npm": "file:///absolute/path/to/opencode-qoder-provider/provider.ts",
+      "models": {
+        "auto":        { "id": "auto",        "name": "Auto (1.0x)",                  "attachment": true,  "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "efficient":   { "id": "efficient",   "name": "Efficient (0.3x)",             "attachment": true,  "reasoning": false, "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "performance": { "id": "performance", "name": "Performance (1.1x)",           "attachment": true,  "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "ultimate":    { "id": "ultimate",    "name": "Ultimate (1.6x)",              "attachment": true,  "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "lite":        { "id": "lite",        "name": "Lite (0x — free)",             "attachment": false, "reasoning": false, "temperature": false, "tool_call": true,  "limit": { "context": 100000, "output": 16000 } },
+        "qmodel":      { "id": "qmodel",      "name": "Qwen-Coder-Qoder-1.0 (0.2x)", "attachment": true,  "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "q35model":    { "id": "q35model",    "name": "Qwen3.5-Plus (0.2x)",          "attachment": true,  "reasoning": false, "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } },
+        "gmodel":      { "id": "gmodel",      "name": "GLM-5 (0.5x)",                "attachment": true,  "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 1000000,"output": 32000 } },
+        "kmodel":      { "id": "kmodel",      "name": "Kimi-K2.5 (0.3x)",            "attachment": false, "reasoning": true,  "temperature": false, "tool_call": true,  "limit": { "context": 256000, "output": 32000 } },
+        "mmodel":      { "id": "mmodel",      "name": "MiniMax-M2.7 (0.2x)",         "attachment": false, "reasoning": false, "temperature": false, "tool_call": true,  "limit": { "context": 200000, "output": 32000 } }
+      }
+    }
+  }
+}
+```
 
-4. Configure Opencode to use the plugin. Add to your `~/.config/opencode/config.json`:
-   ```json
-   {
-     "plugins": [
-       "opencode-qoder-provider"
-     ],
-     "provider": {
-       "qoder": {
-         "name": "Qoder",
-         "models": {
-           "auto": {
-             "id": "auto",
-             "name": "Auto (1.0x)",
-             "attachment": true,
-             "reasoning": true,
-             "temperature": false,
-             "tool_call": true
-           }
-         }
-       }
-     }
-   }
-   ```
+> **Tip:** Replace `/absolute/path/to/opencode-qoder-provider` with the actual path where you cloned this repo.
+
+---
 
 ### Usage
 
-Once installed, you can use Qoder models in Opencode:
-
 ```bash
-# Use default model
-opencode chat --provider qoder
+# Quick one-shot query (free lite model)
+opencode run -m qoder/lite "say hello"
 
-# Use specific model
-opencode chat --provider qoder --model auto
-opencode chat --provider qoder --model efficient
-opencode chat --provider qoder --model performance
-opencode chat --provider qoder --model ultimate
-opencode chat --provider qoder --model lite
+# Use the auto model (paid)
+opencode run -m qoder/auto "explain how async/await works"
+
+# Interactive session
+opencode -m qoder/auto
 ```
+
+---
 
 ### Available Models
 
-| Model ID | Name | Context | Output | Features |
-|----------|------|---------|--------|----------|
-| `auto` | Auto (1.0x) | 200K | 32K | attachment, reasoning, tool_call |
-| `efficient` | Efficient (0.3x) | 200K | 32K | attachment, tool_call |
-| `performance` | Performance (1.1x) | 200K | 32K | attachment, reasoning, tool_call |
-| `ultimate` | Ultimate (1.6x) | 200K | 32K | attachment, reasoning, tool_call |
-| `lite` | Lite (0x) | 100K | 16K | tool_call |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | attachment, reasoning, tool_call |
-| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | attachment, tool_call |
-| `gmodel` | GLM-5 (0.5x) | 1M | 32K | attachment, reasoning, tool_call |
-| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | reasoning, tool_call |
-| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | tool_call |
+| Model ID | Name | Context | Output | Attachment | Reasoning |
+|----------|------|---------|--------|-----------|-----------|
+| `lite` | Lite (0x — **free**) | 100K | 16K | ✗ | ✗ |
+| `auto` | Auto (1.0x) | 200K | 32K | ✓ | ✓ |
+| `efficient` | Efficient (0.3x) | 200K | 32K | ✓ | ✗ |
+| `performance` | Performance (1.1x) | 200K | 32K | ✓ | ✓ |
+| `ultimate` | Ultimate (1.6x) | 200K | 32K | ✓ | ✓ |
+| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | ✓ | ✓ |
+| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5 (0.5x) | 1M | 32K | ✓ | ✓ |
+| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | ✗ | ✓ |
+| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | ✗ | ✗ |
+
+`lite` is the only **free** model; all others require a paid Qoder subscription.
+
+---
+
+### Architecture
+
+```
+opencode-qoder-provider/
+├── index.ts                    # Plugin entry — injects provider.qoder via config hook
+├── provider.ts                 # Exports createQoderProvider() (opencode loader entry)
+├── src/
+│   ├── models.ts               # 10 model definitions
+│   ├── qoder-language-model.ts # LanguageModelV2 implementation (doGenerate + doStream)
+│   ├── prompt-builder.ts       # AI SDK CallOptions → Qoder prompt string
+│   └── vendor/
+│       ├── qoder-agent-sdk.mjs # Bundled Qoder Agent SDK (no external registry needed)
+│       └── qoder-agent-sdk.d.ts
+└── tests/
+    ├── models.test.ts
+    ├── plugin.test.ts
+    ├── qoder-language-model.test.ts
+    └── integration/
+        ├── real-api.test.ts        # Requires ~/.qoder/.auth/user
+        └── opencode-cli.test.ts
+```
+
+---
+
+### Development & Testing
+
+```bash
+# Unit tests (25 tests, no network required)
+npm test
+
+# Integration tests (requires Qoder login)
+npx vitest run tests/integration/real-api.test.ts
+```
+
+---
 
 ### Troubleshooting
 
-**Qoder CLI not found**
-- Make sure `qoder` is in your PATH: `which qoder`
-- If not found, reinstall: `npm install -g @ali/qoder-cli`
+| Problem | Solution |
+|---------|----------|
+| `qodercli not found` | Make sure Qoder CLI is installed and `~/.qoder/bin/qodercli/` exists |
+| `Authentication error` | Run `qoder login` to refresh credentials |
+| `Model not found` | Check the model ID in your `opencode.json` matches the table above |
+| `Plugin not loading` | Verify the `file://` path is absolute and the directory exists |
 
-**Authentication errors**
-- Run `qoder login` again to refresh your session
-- Check your Qoder account status at https://qoder.com
-
-**Plugin not loading**
-- Verify the plugin path in your Opencode config
-- Check Opencode logs: `opencode --verbose`
+---
 
 ### License
 
-MIT License - see [LICENSE](./LICENSE) file for details.
+MIT — see [LICENSE](./LICENSE)
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-Opencode 的 Qoder AI Provider 插件。此插件将 Qoder AI 模型集成到 Opencode CLI 中，让您可以直接从命令行使用 Qoder 的强大 AI 能力。
+### 简介
 
-### 功能特性
+将 **Qoder AI** 的 10 个模型接入 [opencode](https://opencode.ai) 终端的插件。SDK 完整打包，无需访问内部 registry。
 
-- 支持多种 Qoder AI 模型（Auto、Efficient、Performance、Ultimate、Lite 等）
-- 流式响应支持
-- 工具调用能力
-- 图片/多模态输入支持
-- SDK 完全打包（不依赖外部 `@ali/qoder-agent-sdk`）
+---
 
-### 前置要求
+### 前置条件
 
-在使用此插件之前，您需要：
+#### 1. 安装 Qoder CLI
 
-1. **安装 Qoder CLI**
-   ```bash
-   # 通过 npm 安装（推荐）
-   npm install -g @ali/qoder-cli
+从官网 [https://qoder.com/download](https://qoder.com) 下载并安装 Qoder CLI：
 
-   # 或通过 bun 安装
-   bun install -g @ali/qoder-cli
-   ```
+```bash
+# 如果你的 registry 有此包
+npm install -g @ali/qoder-cli
+```
 
-2. **登录 Qoder**
-   ```bash
-   qoder login
-   ```
-   这将打开浏览器窗口进行认证。按照提示完成登录。
+安装后验证：
 
-3. **验证安装**
-   ```bash
-   qoder --version
-   ```
+```bash
+qoder --version
+```
 
-### 安装方法
+CLI 二进制文件会安装到 `~/.qoder/bin/qodercli/qodercli-<版本号>`。
 
-#### 作为 Opencode 插件
+#### 2. 登录 Qoder
 
-1. 克隆此仓库：
-   ```bash
-   git clone https://github.com/yee88/opencode-qoder-provider.git
-   cd opencode-qoder-provider
-   ```
+```bash
+qoder login
+```
 
-2. 安装依赖：
-   ```bash
-   npm install
-   ```
+会打开浏览器进行 OAuth 认证，完成后凭证存储在 `~/.qoder/.auth/user`。
 
-3. 将插件链接或复制到 Opencode 插件目录：
-   ```bash
-   # 选项 1：创建符号链接（开发推荐）
-   ln -s $(pwd) ~/.config/opencode/plugins/opencode-qoder-provider
+#### 3. 安装 opencode
 
-   # 选项 2：复制目录
-   cp -r . ~/.config/opencode/plugins/opencode-qoder-provider
-   ```
+```bash
+npm install -g opencode-ai
+# 或
+bun install -g opencode-ai
+```
 
-4. 配置 Opencode 使用此插件。添加到 `~/.config/opencode/config.json`：
-   ```json
-   {
-     "plugins": [
-       "opencode-qoder-provider"
-     ],
-     "provider": {
-       "qoder": {
-         "name": "Qoder",
-         "models": {
-           "auto": {
-             "id": "auto",
-             "name": "Auto (1.0x)",
-             "attachment": true,
-             "reasoning": true,
-             "temperature": false,
-             "tool_call": true
-           }
-         }
-       }
-     }
-   }
-   ```
+---
+
+### 安装
+
+```bash
+git clone https://github.com/yee88/opencode-qoder-provider.git
+cd opencode-qoder-provider
+npm install
+```
+
+---
+
+### 配置
+
+在 `~/.config/opencode/opencode.json` 中添加插件配置：
+
+```json
+{
+  "plugins": [
+    {
+      "npm": "file:///你的绝对路径/opencode-qoder-provider"
+    }
+  ],
+  "provider": {
+    "qoder": {
+      "name": "Qoder",
+      "npm": "file:///你的绝对路径/opencode-qoder-provider/provider.ts",
+      "models": {
+        "lite": { "id": "lite", "name": "Lite (0x — 免费)", "attachment": false, "reasoning": false, "temperature": false, "tool_call": true, "limit": { "context": 100000, "output": 16000 } },
+        "auto": { "id": "auto", "name": "Auto (1.0x)", "attachment": true, "reasoning": true, "temperature": false, "tool_call": true, "limit": { "context": 200000, "output": 32000 } }
+      }
+    }
+  }
+}
+```
+
+> 将 `你的绝对路径` 替换为仓库实际克隆路径。
+
+---
 
 ### 使用方法
 
-安装完成后，您可以在 Opencode 中使用 Qoder 模型：
-
 ```bash
-# 使用默认模型
-opencode chat --provider qoder
+# 免费 lite 模型快速查询
+opencode run -m qoder/lite "说你好"
 
-# 使用特定模型
-opencode chat --provider qoder --model auto
-opencode chat --provider qoder --model efficient
-opencode chat --provider qoder --model performance
-opencode chat --provider qoder --model ultimate
-opencode chat --provider qoder --model lite
+# 使用 auto 模型（付费）
+opencode run -m qoder/auto "解释一下 async/await 的工作原理"
+
+# 交互式会话
+opencode -m qoder/auto
 ```
+
+---
 
 ### 可用模型
 
-| 模型 ID | 名称 | 上下文长度 | 输出长度 | 功能特性 |
-|---------|------|-----------|---------|---------|
-| `auto` | Auto (1.0x) | 200K | 32K | 附件、推理、工具调用 |
-| `efficient` | Efficient (0.3x) | 200K | 32K | 附件、工具调用 |
-| `performance` | Performance (1.1x) | 200K | 32K | 附件、推理、工具调用 |
-| `ultimate` | Ultimate (1.6x) | 200K | 32K | 附件、推理、工具调用 |
-| `lite` | Lite (0x) | 100K | 16K | 工具调用 |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | 附件、推理、工具调用 |
-| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | 附件、工具调用 |
-| `gmodel` | GLM-5 (0.5x) | 1M | 32K | 附件、推理、工具调用 |
-| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | 推理、工具调用 |
-| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | 工具调用 |
+| 模型 ID | 名称 | 上下文 | 输出 | 附件 | 推理 |
+|---------|------|-------|------|-----|-----|
+| `lite` | Lite (0x — **免费**) | 100K | 16K | ✗ | ✗ |
+| `auto` | Auto (1.0x) | 200K | 32K | ✓ | ✓ |
+| `efficient` | Efficient (0.3x) | 200K | 32K | ✓ | ✗ |
+| `performance` | Performance (1.1x) | 200K | 32K | ✓ | ✓ |
+| `ultimate` | Ultimate (1.6x) | 200K | 32K | ✓ | ✓ |
+| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | ✓ | ✓ |
+| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5 (0.5x) | 1M | 32K | ✓ | ✓ |
+| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | ✗ | ✓ |
+| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | ✗ | ✗ |
 
-### 故障排除
+`lite` 是唯一**免费**模型，其余需要付费套餐。
 
-**找不到 Qoder CLI**
-- 确保 `qoder` 在您的 PATH 中：`which qoder`
-- 如果未找到，重新安装：`npm install -g @ali/qoder-cli`
+---
 
-**认证错误**
-- 再次运行 `qoder login` 刷新会话
-- 在 https://qoder.com 检查您的 Qoder 账户状态
+### 开发与测试
 
-**插件未加载**
-- 验证 Opencode 配置中的插件路径
-- 检查 Opencode 日志：`opencode --verbose`
+```bash
+# 单元测试（25 个，无需网络）
+npm test
+
+# 集成测试（需要 Qoder 登录）
+npx vitest run tests/integration/real-api.test.ts
+```
+
+---
+
+### 常见问题
+
+| 问题 | 解决方法 |
+|------|---------|
+| `qodercli not found` | 确保 Qoder CLI 已安装，`~/.qoder/bin/qodercli/` 目录存在 |
+| 认证错误 | 运行 `qoder login` 刷新凭证 |
+| 模型找不到 | 检查 `opencode.json` 中的模型 ID 是否与上表一致 |
+| 插件未加载 | 确认 `file://` 路径为绝对路径且目录存在 |
+
+---
 
 ### 许可证
 
-MIT 许可证 - 详情见 [LICENSE](./LICENSE) 文件。
+MIT — 详见 [LICENSE](./LICENSE)

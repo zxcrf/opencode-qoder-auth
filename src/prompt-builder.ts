@@ -1,5 +1,5 @@
 import type { LanguageModelV2CallOptions, LanguageModelV2Prompt } from '@ai-sdk/provider'
-import type { SDKUserMessage } from './bundled-sdk/qoder-agent-sdk.mjs'
+import type { SDKUserMessage } from './vendor/qoder-agent-sdk.mjs'
 
 /**
  * 从 opencode 传入的 LanguageModelV2CallOptions 中构造 Qoder query 的 prompt。

@@ -16,8 +16,8 @@ type V2StreamPart =
   | { type: 'tool-input-delta'; id: string; delta: string }
   | { type: 'finish'; finishReason: LanguageModelV2FinishReason; usage: LanguageModelV2Usage }
   | { type: 'error'; error: unknown }
-import { query } from './bundled-sdk/qoder-agent-sdk.mjs'
-import type { SDKMessage } from './bundled-sdk/qoder-agent-sdk.mjs'
+import { query } from './vendor/qoder-agent-sdk.mjs'
+import type { SDKMessage } from './vendor/qoder-agent-sdk.mjs'
 import { existsSync, readdirSync } from 'fs'
 import { join } from 'path'
 import os from 'os'
