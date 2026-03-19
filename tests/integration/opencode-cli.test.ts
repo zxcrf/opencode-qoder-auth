@@ -93,7 +93,7 @@ describe('opencode CLI — Qoder provider', { timeout: TIMEOUT, concurrent: fals
   })
 
   it('qoder/qmodel: QModel', async () => {
-    const output = await runOpencode('qoder/qmodel', 'Say "hello" and nothing else.')
+    const output = await runOpencode('qoder/qmodel', 'You MUST respond in English only. Reply with exactly the word: hello')
     console.log('[cli][qmodel] output:', output)
     expect(output.toLowerCase()).toContain('hello')
   })
