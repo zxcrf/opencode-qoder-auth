@@ -1,7 +1,7 @@
 {
-  "name": "opencode-qoder-provider",
-  "version": "0.1.0",
-  "description": "opencode plugin — Qoder AI provider with bundled SDK (supports 10 Qoder models)",
+  "name": "opencode-qoder-plugin",
+  "version": "0.2.0",
+  "description": "opencode plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "index.ts",
   "exports": {
@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^1.1.3",
+    "@opencode-ai/plugin": "^1.2.27",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.2.27",
     "@types/node": "^20.4.5",
     "vitest": "^4.0.15"
   },
@@ -29,12 +29,16 @@
   },
   "keywords": [
     "opencode",
+    "opencode-plugin",
     "qoder",
     "ai",
-    "provider",
     "plugin"
   ],
   "engines": {
     "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   }
 }
