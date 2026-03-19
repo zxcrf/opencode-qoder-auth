@@ -1,0 +1,38 @@
+{
+  "name": "opencode-qoder-provider",
+  "version": "0.1.0",
+  "description": "Opencode plugin — Qoder AI provider with bundled SDK",
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./provider": "./provider.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^1.1.3"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.2.27",
+    "@types/node": "^20.4.5",
+    "vitest": "^4.0.15"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yee88/opencode-qoder-provider.git"
+  },
+  "keywords": [
+    "opencode",
+    "qoder",
+    "ai",
+    "provider",
+    "plugin"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
