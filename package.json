@@ -13,7 +13,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^1.1.3",
+    "@ai-sdk/provider": "^3.0.8",
     "@opencode-ai/plugin": "^1.2.27",
     "zod": "^3.22.4"
   },
