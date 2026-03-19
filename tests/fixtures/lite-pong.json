@@ -1,0 +1,8 @@
+{
+  "name": "lite-pong",
+  "model": "qoder/lite",
+  "prompt": "Reply with exactly the word: PONG",
+  "stdout": "PONG\n",
+  "stderr": "\u001b[0m\n> orchestrator · lite\n\u001b[0m\n",
+  "exitCode": 0
+}

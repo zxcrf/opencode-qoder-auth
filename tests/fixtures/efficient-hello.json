@@ -1,0 +1,8 @@
+{
+  "name": "efficient-hello",
+  "model": "qoder/efficient",
+  "prompt": "Say \"hello\" and nothing else.",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator · efficient\n\u001b[0m\n",
+  "exitCode": 0
+}

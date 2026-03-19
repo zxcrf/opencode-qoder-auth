@@ -1,0 +1,8 @@
+{
+  "name": "ultimate-hello",
+  "model": "qoder/ultimate",
+  "prompt": "Say \"hello\" and nothing else.",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator · ultimate\n\u001b[0m\n",
+  "exitCode": 0
+}

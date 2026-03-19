@@ -1,0 +1,8 @@
+{
+  "name": "performance-hello",
+  "model": "qoder/performance",
+  "prompt": "Say \"hello\" and nothing else.",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator · performance\n\u001b[0m\n",
+  "exitCode": 0
+}

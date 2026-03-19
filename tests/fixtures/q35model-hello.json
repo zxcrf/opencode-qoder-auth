@@ -1,0 +1,8 @@
+{
+  "name": "q35model-hello",
+  "model": "qoder/q35model",
+  "prompt": "Say \"hello\" and nothing else.",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator · q35model\n\u001b[0m\n",
+  "exitCode": 0
+}

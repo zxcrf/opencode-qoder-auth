@@ -1,0 +1,8 @@
+{
+  "name": "mmodel-hello",
+  "model": "qoder/mmodel",
+  "prompt": "Say \"hello\" and nothing else.",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator \u00b7 mmodel\n\u001b[0m\n",
+  "exitCode": 0
+}

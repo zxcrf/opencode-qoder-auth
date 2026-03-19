@@ -1,0 +1,8 @@
+{
+  "name": "qmodel-hello",
+  "model": "qoder/qmodel",
+  "prompt": "You MUST respond in English only. Reply with exactly the word: hello",
+  "stdout": "hello\n",
+  "stderr": "\u001b[0m\n> orchestrator · qmodel\n\u001b[0m\n",
+  "exitCode": 0
+}
