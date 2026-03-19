@@ -60,16 +60,16 @@ opencode -m qoder/auto
 
 | Model ID | Name | Context | Output | Attachment | Reasoning |
 |----------|------|---------|--------|-----------|-----------|
-| `lite` | Lite — **free** | 100K | 16K | ✗ | ✗ |
-| `auto` | Auto (1.0x) | 200K | 32K | ✓ | ✓ |
-| `efficient` | Efficient (0.3x) | 200K | 32K | ✓ | ✗ |
-| `performance` | Performance (1.1x) | 200K | 32K | ✓ | ✓ |
-| `ultimate` | Ultimate (1.6x) | 200K | 32K | ✓ | ✓ |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | ✓ | ✓ |
-| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | ✓ | ✗ |
-| `gmodel` | GLM-5 (0.5x) | 1M | 32K | ✓ | ✓ |
-| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | ✗ | ✓ |
-| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | ✗ | ✗ |
+| `lite` | Lite — **free** | 180K | 32K | ✗ | ✗ |
+| `auto` | Auto (1.0x) | 180K | 32K | ✓ | ✗ |
+| `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
+| `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
+| `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
+| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
+| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
+| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32K | ✓ | ✗ |
+| `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32K | ✓ | ✗ |
 
 ---
 
@@ -149,16 +149,16 @@ opencode -m qoder/auto
 
 | 模型 ID | 名称 | 上下文 | 输出 | 附件 | 推理 |
 |---------|------|-------|------|-----|-----|
-| `lite` | Lite — **免费** | 100K | 16K | ✗ | ✗ |
-| `auto` | Auto (1.0x) | 200K | 32K | ✓ | ✓ |
-| `efficient` | Efficient (0.3x) | 200K | 32K | ✓ | ✗ |
-| `performance` | Performance (1.1x) | 200K | 32K | ✓ | ✓ |
-| `ultimate` | Ultimate (1.6x) | 200K | 32K | ✓ | ✓ |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 200K | 32K | ✓ | ✓ |
-| `q35model` | Qwen3.5-Plus (0.2x) | 200K | 32K | ✓ | ✗ |
-| `gmodel` | GLM-5 (0.5x) | 1M | 32K | ✓ | ✓ |
-| `kmodel` | Kimi-K2.5 (0.3x) | 256K | 32K | ✗ | ✓ |
-| `mmodel` | MiniMax-M2.7 (0.2x) | 200K | 32K | ✗ | ✗ |
+| `lite` | Lite — **免费** | 180K | 32K | ✗ | ✗ |
+| `auto` | Auto (1.0x) | 180K | 32K | ✓ | ✗ |
+| `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
+| `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
+| `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
+| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
+| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
+| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32K | ✓ | ✗ |
+| `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32K | ✓ | ✗ |
 
 ---
 

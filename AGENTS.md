@@ -62,6 +62,43 @@ Releases are automated via GitHub Actions:
 > **NPM_TOKEN** must be set in GitHub repo Settings → Secrets → `NPM_TOKEN`.  
 > Use an **Automation** type token from https://www.npmjs.com/settings/~/tokens to bypass OTP.
 
+## Updating Model Definitions
+
+The authoritative source for model parameters is the local Qoder auth cache:
+
+```
+~/.qoder/.auth/models   # JSON written by Qoder CLI on login/refresh
+```
+
+When Qoder releases new models or changes parameters, update `src/models.ts` to match the `assistant` array in that file. Field mapping:
+
+| `~/.qoder/.auth/models` field | `QoderModelDefinition` field | Notes |
+|-------------------------------|------------------------------|-------|
+| `key` | `id` | model identifier passed to SDK |
+| `is_vl` | `attachment` | vision/multimodal support |
+| `is_reasoning` | `reasoning` | extended thinking mode |
+| `max_input_tokens` | `limit.context` | |
+| `max_output_tokens` | `limit.output` | |
+
+After editing `src/models.ts`, also update the model table in `README.md` (both English and Chinese sections).
+
+### Current model snapshot (from `~/.qoder/.auth/models` → `assistant`)
+
+| Model ID | Name | Context | Output | Attachment (`is_vl`) | Reasoning (`is_reasoning`) |
+|----------|------|---------|--------|----------------------|---------------------------|
+| `auto` | Auto (1.0x) | 180K | 32768 | ✓ | ✗ |
+| `ultimate` | Ultimate (1.6x) | 180K | 32768 | ✓ | ✓ |
+| `performance` | Performance (1.1x) | 180K | 32768 | ✓ | ✗ |
+| `efficient` | Efficient (0.3x) | 180K | 32768 | ✓ | ✗ |
+| `lite` | Lite (free) | 180K | 32768 | ✗ | ✗ |
+| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32768 | ✓ | ✗ |
+| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32768 | ✓ | ✗ |
+| `gmodel` | GLM-5 (0.5x) | 180K | 32768 | ✓ | ✗ |
+| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32768 | ✓ | ✗ |
+| `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32768 | ✓ | ✗ |
+
+---
+
 ## What NOT to Do
 
 - Do not modify `src/vendor/` files without thorough integration testing
