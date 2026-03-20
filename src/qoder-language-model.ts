@@ -2,7 +2,9 @@ import type {
   LanguageModelV2,
   LanguageModelV2CallOptions,
   LanguageModelV2Content,
+  LanguageModelV2FunctionTool,
   LanguageModelV2FinishReason,
+  LanguageModelV2ProviderDefinedTool,
   LanguageModelV2StreamPart,
   LanguageModelV2Usage,
   ProviderV2,
@@ -10,9 +12,9 @@ import type {
 
 import { query } from './vendor/qoder-agent-sdk.mjs'
 import type { SDKMessage } from './vendor/qoder-agent-sdk.mjs'
-import { existsSync, readdirSync } from 'fs'
-import { join } from 'path'
-import os from 'os'
+import { existsSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import os from 'node:os'
 import { buildPromptFromOptions } from './prompt-builder.js'
 
 /**
@@ -105,15 +107,11 @@ export class QoderLanguageModel implements LanguageModelV2 {
     const prompt = buildPromptFromOptions(options)
 
     const cliPath = resolveQoderCLI()
+    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath)
 
     const qoderQuery = query({
       prompt,
-      options: {
-        model: this.modelId,
-        allowDangerouslySkipPermissions: true,
-        permissionMode: 'bypassPermissions',
-        ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
-      },
+      options: qoderOptions,
     })
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
@@ -341,6 +339,179 @@ function normalizeToolResultContent(toolName: string, content: unknown): {
  */
 function extractError(_msg: SDKMessage): Extract<LanguageModelV2StreamPart, { type: 'error' }> | null {
   return null
+}
+
+type QoderMcpServerConfig =
+  | {
+      type?: 'stdio'
+      command: string
+      args?: string[]
+      env?: Record<string, string>
+    }
+  | {
+      type: 'http' | 'sse'
+      url: string
+      headers?: Record<string, string>
+    }
+
+type QoderProviderOptions = {
+  mcpServers?: Record<string, unknown>
+}
+
+function buildQoderQueryOptions(
+  options: LanguageModelV2CallOptions,
+  modelId: string,
+  cliPath?: string,
+): {
+  model: string
+  allowDangerouslySkipPermissions: true
+  permissionMode: 'bypassPermissions'
+  pathToQoderCLIExecutable?: string
+  mcpServers?: Record<string, QoderMcpServerConfig>
+} {
+  const providerOptions = getQoderProviderOptions(options.providerOptions)
+  const mcpServers = {
+    ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),
+    ...extractMcpServersFromTools(options.tools),
+  }
+
+  return {
+    model: modelId,
+    allowDangerouslySkipPermissions: true,
+    permissionMode: 'bypassPermissions',
+    ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+  }
+}
+
+function getQoderProviderOptions(
+  providerOptions: LanguageModelV2CallOptions['providerOptions'],
+): QoderProviderOptions | undefined {
+  if (!isRecord(providerOptions)) return undefined
+  const qoderOptions = providerOptions.qoder
+  return isRecord(qoderOptions) ? (qoderOptions as QoderProviderOptions) : undefined
+}
+
+function extractMcpServersFromProviderOptions(
+  mcpServers: unknown,
+): Record<string, QoderMcpServerConfig> {
+  if (!isRecord(mcpServers)) return {}
+
+  const normalizedEntries = Object.entries(mcpServers)
+    .map(([name, config]) => [name, normalizeMcpServerConfig(config)] as const)
+    .filter((entry): entry is [string, QoderMcpServerConfig] => entry[1] != null)
+
+  return Object.fromEntries(normalizedEntries)
+}
+
+function extractMcpServersFromTools(
+  tools: LanguageModelV2CallOptions['tools'],
+): Record<string, QoderMcpServerConfig> {
+  if (!tools || tools.length === 0) return {}
+
+  const servers: Record<string, QoderMcpServerConfig> = {}
+
+  for (const tool of tools) {
+    if (tool.type !== 'provider-defined') continue
+
+    const serverName = inferProviderDefinedToolServerName(tool)
+    const serverConfig = inferProviderDefinedToolServerConfig(tool)
+    if (!serverName || !serverConfig) continue
+
+    servers[serverName] = serverConfig
+  }
+
+  return servers
+}
+
+function inferProviderDefinedToolServerName(tool: LanguageModelV2ProviderDefinedTool): string | undefined {
+  const args = isRecord(tool.args) ? tool.args : undefined
+  const explicitName =
+    pickString(args?.serverName) ??
+    pickString(args?.mcpServerName) ??
+    pickString(args?.server) ??
+    pickString(args?.name)
+
+  if (explicitName) return explicitName
+
+  const [, suffix] = tool.id.split('.', 2)
+  return suffix || tool.name
+}
+
+function inferProviderDefinedToolServerConfig(
+  tool: LanguageModelV2ProviderDefinedTool,
+): QoderMcpServerConfig | null {
+  return normalizeMcpServerConfig(tool.args)
+}
+
+function normalizeMcpServerConfig(config: unknown): QoderMcpServerConfig | null {
+  if (!isRecord(config)) return null
+  if (config.enabled === false) return null
+
+  if (Array.isArray(config.command) && config.command.every((value) => typeof value === 'string')) {
+    if (config.command.length === 0) return null
+
+    const [command, ...args] = config.command
+    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
+
+    return {
+      command,
+      ...(args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+    }
+  }
+
+  if (typeof config.command === 'string') {
+    const args = pickStringArray(config.args)
+    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
+
+    return {
+      ...(config.type === 'stdio' ? { type: 'stdio' as const } : {}),
+      command: config.command,
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+    }
+  }
+
+  const url = pickString(config.url) ?? pickString(config.endpoint)
+  if (url) {
+    const headers = pickStringRecord(config.headers)
+    return {
+      type: config.type === 'sse' ? 'sse' : 'http',
+      url,
+      ...(headers ? { headers } : {}),
+    }
+  }
+
+  if (isRecord(config.mcpServer)) {
+    return normalizeMcpServerConfig(config.mcpServer)
+  }
+
+  if (isRecord(config.serverConfig)) {
+    return normalizeMcpServerConfig(config.serverConfig)
+  }
+
+  return null
+}
+
+function pickString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function pickStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined
+}
+
+function pickStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined
+  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export function createQoderProvider(): ProviderV2 {

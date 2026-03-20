@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-plugin",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "opencode plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "index.ts",
@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "vendor:patch-sdk": "node ./scripts/patch-qoder-agent-sdk.mjs"
   },
   "dependencies": {
     "@ai-sdk/provider": "^3.0.8",

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type {
   LanguageModelV2CallOptions,
@@ -495,6 +496,98 @@ describe('QoderLanguageModel', () => {
       expect(callArgs.options?.model).toBe('ultimate')
     })
 
+    it('透传 providerOptions.qoder.mcpServers 到 query', async () => {
+      mockQueryMessages.push({
+        type: 'result',
+        subtype: 'success',
+        uuid: 'uuid-mcp-1',
+        session_id: 'sess-mcp',
+        result: '',
+        duration_ms: 10,
+        duration_api_ms: 8,
+        is_error: false,
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+      })
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(
+        buildCallOptions('ping', {
+          providerOptions: {
+            qoder: {
+              mcpServers: {
+                weather: {
+                  type: 'local',
+                  command: ['npx', '-y', '@acme/weather-mcp'],
+                  environment: { API_KEY: 'secret' },
+                },
+              },
+            },
+          },
+        }),
+      )
+      await collectStream(stream)
+
+      const callArgs = mockQuery.mock.calls[0][0]
+      expect(callArgs.options?.mcpServers).toEqual({
+        weather: {
+          command: 'npx',
+          args: ['-y', '@acme/weather-mcp'],
+          env: { API_KEY: 'secret' },
+        },
+      })
+    })
+
+    it('从 provider-defined tools 推导 mcpServers 并透传到 query', async () => {
+      mockQueryMessages.push({
+        type: 'result',
+        subtype: 'success',
+        uuid: 'uuid-mcp-2',
+        session_id: 'sess-mcp',
+        result: '',
+        duration_ms: 10,
+        duration_api_ms: 8,
+        is_error: false,
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+      })
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(
+        buildCallOptions('ping', {
+          tools: [
+            {
+              type: 'provider-defined',
+              id: 'qoder.weather',
+              name: 'weather_forecast',
+              args: {
+                serverName: 'weather',
+                type: 'local',
+                command: ['uvx', 'weather-mcp'],
+                environment: { WEATHER_TOKEN: 'token' },
+              },
+            },
+          ],
+        }),
+      )
+      await collectStream(stream)
+
+      const callArgs = mockQuery.mock.calls[0][0]
+      expect(callArgs.options?.mcpServers).toEqual({
+        weather: {
+          command: 'uvx',
+          args: ['weather-mcp'],
+          env: { WEATHER_TOKEN: 'token' },
+        },
+      })
+    })
+
     it('doGenerate 返回完整文本', async () => {
       mockQueryMessages.push({
         type: 'assistant',
@@ -534,7 +627,10 @@ describe('QoderLanguageModel', () => {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-function buildCallOptions(userText: string): LanguageModelV2CallOptions {
+function buildCallOptions(
+  userText: string,
+  extra: Partial<LanguageModelV2CallOptions> = {},
+): LanguageModelV2CallOptions {
   return {
     inputFormat: 'prompt',
     mode: { type: 'regular' },
@@ -544,6 +640,7 @@ function buildCallOptions(userText: string): LanguageModelV2CallOptions {
         content: [{ type: 'text', text: userText }],
       },
     ],
+    ...extra,
   }
 }
 
