@@ -55,6 +55,79 @@ interface SDKConfig {
 declare function configure(config: SDKConfig): void;
 
 /**
+ * SDK Logger Module
+ *
+ * Provides structured file-based logging with rotation support.
+ */
+/**
+ * Log level enumeration
+ */
+declare enum LogLevel {
+    DEBUG = 0,
+    INFO = 1,
+    WARN = 2,
+    ERROR = 3
+}
+/**
+ * Logger configuration options
+ */
+interface LoggerConfig {
+    /** Enable or disable logging (default: true) */
+    enabled?: boolean;
+    /** Minimum log level to record (default: INFO) */
+    level?: LogLevel;
+    /** Directory for log files (default: ~/.qoder/logs/) */
+    directory?: string;
+    /** Log filename (default: qoder-agent-sdk-typescript.log) */
+    filename?: string;
+    /** Maximum file size in bytes before rotation (default: 10MB) */
+    maxSize?: number;
+    /** Number of days to retain rotated logs (default: 7) */
+    retentionDays?: number;
+}
+/**
+ * Logger interface
+ */
+interface ILogger {
+    Debug(message: string, context?: string, meta?: Record<string, unknown>): void;
+    Info(message: string, context?: string, meta?: Record<string, unknown>): void;
+    Warn(message: string, context?: string, meta?: Record<string, unknown>): void;
+    Error(message: string, context?: string, meta?: Record<string, unknown>): void;
+    flush(): Promise<void>;
+}
+/**
+ * Configure the SDK logger
+ *
+ * @example
+ * ```typescript
+ * import { configureLogger, LogLevel } from '@ali/qoder-agent-sdk';
+ *
+ * configureLogger({
+ *   level: LogLevel.DEBUG,
+ *   directory: '/var/log/myapp',
+ *   maxSize: 20 * 1024 * 1024, // 20MB
+ * });
+ * ```
+ */
+declare function configureLogger(config: LoggerConfig): void;
+/**
+ * SDK Logger instance
+ *
+ * Provides structured logging with automatic file rotation.
+ * Logs are written to ~/.qoder/logs/qoder-agent-sdk-typescript.log by default.
+ *
+ * @example
+ * ```typescript
+ * import { logger } from '@ali/qoder-agent-sdk';
+ *
+ * logger.Info('Operation started', 'MyModule');
+ * logger.Debug('Debug info', 'MyModule', { requestId: '123' });
+ * logger.Error('Something failed', 'MyModule', { error: 'timeout' });
+ * ```
+ */
+declare const logger: ILogger;
+
+/**
  * Common types used across the SDK
  */
 /** UUID type alias */
@@ -697,6 +770,8 @@ interface SDKUserMessage {
     type: 'user';
     uuid?: UUID;
     session_id: string;
+    /** Optional request set ID for tracking/tracing; overrides the CLI's auto-generated value */
+    request_id?: string;
     message: APIUserMessage;
     parent_tool_use_id: string | null;
 }
@@ -948,18 +1023,36 @@ interface McpStdioServerConfig {
     command: string;
     args?: string[];
     env?: Record<string, string>;
+    /**
+     * Indicates whether this server acts as a proxy aggregating
+     * multiple backend MCP servers. Proxied tool names use the format:
+     * mcp__{server_name}__{tool_name}
+     */
+    isProxy?: boolean;
 }
 /** MCP SSE server configuration */
 interface McpSSEServerConfig {
     type: 'sse';
     url: string;
     headers?: Record<string, string>;
+    /**
+     * Indicates whether this server acts as a proxy aggregating
+     * multiple backend MCP servers. Proxied tool names use the format:
+     * mcp__{server_name}__{tool_name}
+     */
+    isProxy?: boolean;
 }
 /** MCP HTTP server configuration */
 interface McpHttpServerConfig {
     type: 'http';
     url: string;
     headers?: Record<string, string>;
+    /**
+     * Indicates whether this server acts as a proxy aggregating
+     * multiple backend MCP servers. Proxied tool names use the format:
+     * mcp__{server_name}__{tool_name}
+     */
+    isProxy?: boolean;
 }
 /** MCP Server interface (minimal representation) */
 interface McpServer {
@@ -1187,6 +1280,18 @@ interface LoginResult {
     username?: string;
 }
 /**
+ * Result of the startLogin operation (returns login URL without opening browser)
+ */
+interface StartLoginResult {
+    success: boolean;
+    /** OAuth 登录页面 URL，由调用方自行拉起浏览器 */
+    loginUrl?: string;
+    /** 如果已登录则为 true */
+    alreadyLoggedIn?: boolean;
+    username?: string;
+    message?: string;
+}
+/**
  * Result of the logout operation
  */
 interface LogoutResult {
@@ -1225,6 +1330,8 @@ interface QoderWorkAccessResult {
 interface FeedbackResult {
     success: boolean;
     message: string;
+    /** 反馈请求 ID，提交成功时返回 */
+    requestId?: string;
 }
 /**
  * User quota information
@@ -1256,7 +1363,76 @@ interface AddOnQuota {
  * Organization Resource Package
  */
 interface OrgResourcePackage {
+    /** Used quota amount */
     used: number;
+    /** Quota cap (upper limit for this member) */
+    cap: number;
+    /** Remaining quota amount */
+    remaining: number;
+    /** Usage percentage (0-100) */
+    percentage: number;
+    /** Whether the org resource package is available */
+    available: boolean;
+    /** Unit of quota (e.g., "credits") */
+    unit: string;
+}
+/**
+ * Result of the case submit enabled check
+ */
+interface CaseSubmitEnabledResult {
+    /** Whether case submit is enabled */
+    enabled: boolean;
+}
+/**
+ * Model configuration from server
+ */
+interface ModelConfig {
+    /** Unique key identifier, e.g. "deepseek-v3" */
+    key: string;
+    /** Display name for UI */
+    displayName: string;
+    /** Output format, e.g. "openai", "dashscope" */
+    format: string;
+    /** Whether the model supports multimodal (vision) */
+    isVl: boolean;
+    /** Whether the model supports reasoning */
+    isReasoning: boolean;
+    /** Optional model URL */
+    url: string;
+    /** Source type: "system" or "user" */
+    source: string;
+    /** Max input token limit */
+    maxInputTokens: number;
+    /** Whether the model is enabled */
+    enable: boolean;
+    /** Price factor */
+    priceFactor: number;
+    /** Original price factor */
+    originalPriceFactor: number;
+    /** Whether this is the default model */
+    isDefault: boolean;
+    /** Whether this is a new model */
+    isNew: boolean;
+    /** Model tags, e.g. ["limited_time_free"] */
+    tags: string[];
+    /** Model provider */
+    modelProvider: string;
+    /** Max output token limit */
+    maxOutputTokens: number;
+}
+/**
+ * Options for filtering models
+ */
+interface GetModelsOptions {
+    /** Filter models by scene */
+    scene?: string;
+}
+/**
+ * Result of getModels operation
+ */
+interface ModelsResult {
+    /** List of available models */
+    models: ModelConfig[];
 }
 /**
  * Account usage information
@@ -1280,8 +1456,31 @@ interface UsageInfo {
     addOnQuota: AddOnQuota;
     /** Whether quota is exceeded */
     isQuotaExceeded: boolean;
+    /** Whether this is a prorated quota period for Team users */
+    isPlanQuotaProrated: boolean;
     /** Organization Resource Package */
     orgResourcePackage: OrgResourcePackage;
+}
+
+/**
+ * Telemetry tracking types
+ */
+/**
+ * Generic tracking event - a map of key-value pairs.
+ * Required fields: event_type, session_id
+ * Optional fields: message_id, business_id, and any custom fields
+ */
+type TrackingEvent = Record<string, unknown> & {
+    event_type: string;
+    session_id: string;
+};
+/**
+ * Response from tracking control request
+ */
+interface TrackingResponse {
+    success: boolean;
+    event_type?: string;
+    error?: string;
 }
 
 /**
@@ -1320,6 +1519,12 @@ interface Transport {
      * @returns True if transport is ready to send/receive messages
      */
     isReady(): boolean;
+    /**
+     * Transport 断开连接时 reject 的 Promise，用于让 control request 快速失败。
+     * - SubprocessTransport: 子进程退出时 reject
+     * - TcpTransport: socket 关闭/出错时 reject
+     */
+    getDisconnectPromise(): Promise<never>;
     /**
      * End the input stream (close stdin for process transports).
      */
@@ -1441,7 +1646,10 @@ declare class SubprocessTransport implements Transport {
     private maxBufferSize;
     private tempFiles;
     private writeLock;
+    private _disconnectPromise;
+    private _disconnectReject;
     constructor({ prompt, options }: SubprocessTransportOptions);
+    private resetDisconnectPromise;
     /**
      * Find Qoder CLI binary
      */
@@ -1464,42 +1672,66 @@ declare class SubprocessTransport implements Transport {
     close(): Promise<void>;
     endInput(): Promise<void>;
     isReady(): boolean;
+    getDisconnectPromise(): Promise<never>;
     queryPrepare(_messages?: unknown[]): Promise<void>;
 }
 
 /**
- * Socat transport implementation for remote TCP connection
+ * TCP/Unix Socket/Named Pipe transport implementation for direct socket connection
+ *
+ * Supports three endpoint types:
+ * - TCP: "host:port" format (e.g., "192.168.64.10:1024")
+ * - Unix Socket: absolute path format (e.g., "/tmp/qoderwork-chat.sock")
+ * - Windows Named Pipe: pipe path format (e.g., "\\\\.\pipe\\qoderwork-chat" or "//./pipe/qoderwork-chat")
+ *
+ * Endpoint type is auto-detected: paths starting with "/" are treated as
+ * Unix Sockets, Windows pipe paths are treated as Named Pipes,
+ * everything else is parsed as TCP host:port.
  */
 
-interface SocatTransportOptions {
-    prompt: string | AsyncIterable<SDKUserMessage>;
-    options: Options;
-    socatCommand?: string;
+interface TcpTransportOptions {
+    prompt?: string | AsyncIterable<SDKUserMessage>;
+    options?: Options;
     chatEndpoint?: string;
     apiBaseUrl?: string;
 }
+interface IsConnectableOptions {
+    chatEndpoint?: string;
+    timeoutMs?: number;
+    retries?: number;
+    retryDelayMs?: number;
+}
 /**
- * Socat transport for remote TCP connection
+ * Check if the remote endpoint is connectable via TCP or Unix Socket
+ * @param options - Configuration options for connection check
+ * @returns Promise<boolean> - true if connectable, false otherwise
  */
-declare class SocatTransport implements Transport {
+declare function isConnectable(options?: IsConnectableOptions): Promise<boolean>;
+/**
+ * Socket transport for direct connection to remote VM (TCP or Unix Socket)
+ */
+declare class TcpTransport implements Transport {
     private prompt;
     private isStreaming;
     private options;
-    private process;
-    private stdoutReader;
+    private socket;
+    private socketReader;
     private ready;
     private exitError;
     private maxBufferSize;
     private writeLock;
-    private socatCommand;
     private chatEndpoint;
-    constructor({ prompt, options, socatCommand, chatEndpoint, apiBaseUrl }: SocatTransportOptions);
+    private _disconnectPromise;
+    private _disconnectReject;
+    constructor({ prompt, options, chatEndpoint }?: TcpTransportOptions);
+    private resetDisconnectPromise;
     connect(): Promise<void>;
     write(data: string): Promise<void>;
     readMessages(): AsyncIterableIterator<Record<string, unknown>>;
     close(): Promise<void>;
     endInput(): Promise<void>;
     isReady(): boolean;
+    getDisconnectPromise(): Promise<never>;
     queryPrepare(messages?: unknown[]): Promise<void>;
     /**
      * Get account ID from options or generate from cwd
@@ -1509,6 +1741,152 @@ declare class SocatTransport implements Transport {
      * Generate sessionId from cwd using SHA-256 hash
      */
     private generateSessionId;
+}
+
+/**
+ * Query handler for bidirectional control protocol
+ */
+
+/**
+ * Account operation types supported by the CLI
+ */
+type AccountOperationType = 'login' | 'logout' | 'status' | 'qoder_work_check' | 'usage' | 'case_submit_enabled' | 'models' | 'start_login' | 'complete_login';
+/**
+ * Response from account operation control request
+ */
+interface AccountOperationResponse {
+    /** Whether the operation succeeded */
+    success: boolean;
+    /** The operation type */
+    operation: AccountOperationType;
+    /** Operation-specific data */
+    data?: Record<string, unknown>;
+    /** Error message if success is false */
+    error?: string;
+}
+interface QueryHandlerOptions {
+    transport: Transport;
+    isStreamingMode: boolean;
+    canUseTool?: CanUseTool;
+    hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
+    sdkMcpServers?: Record<string, McpServer>;
+    initializeTimeout?: number;
+}
+/**
+ * Handles bidirectional control protocol on top of Transport.
+ *
+ * This class manages:
+ * - Control request/response routing
+ * - Hook callbacks
+ * - Tool permission callbacks
+ * - Message streaming
+ * - Initialization handshake
+ */
+declare class QueryHandler {
+    private transport;
+    private isStreamingMode;
+    private canUseTool?;
+    private hooks;
+    private sdkMcpServers;
+    private initializeTimeout;
+    private pendingControlResponses;
+    private hookCallbacks;
+    private nextCallbackId;
+    private requestCounter;
+    private messageQueue;
+    private messageResolvers;
+    private initialized;
+    private closed;
+    private initializationResult;
+    private firstResultReceived;
+    private firstResultResolvers;
+    private readingMessages;
+    constructor(options: QueryHandlerOptions);
+    /**
+     * Initialize control protocol if in streaming mode
+     */
+    initialize(): Promise<Record<string, unknown> | null>;
+    /**
+     * Start reading messages from transport
+     */
+    start(): Promise<void>;
+    /**
+     * Background message reading loop
+     */
+    private readMessagesLoop;
+    /**
+     * Enqueue a message for consumers
+     */
+    private enqueueMessage;
+    /**
+     * Handle incoming control request from CLI
+     */
+    private handleControlRequest;
+    /**
+     * Send control request to CLI and wait for response
+     */
+    private sendControlRequest;
+    /**
+     * Handle an MCP request for an SDK server
+     */
+    private handleSdkMcpRequest;
+    /**
+     * Send interrupt control request
+     */
+    interrupt(): Promise<void>;
+    /**
+     * Change permission mode
+     */
+    setPermissionMode(mode: string): Promise<void>;
+    /**
+     * Change the AI model
+     */
+    setModel(model?: string): Promise<void>;
+    /**
+     * Change max thinking tokens
+     */
+    setMaxThinkingTokens(maxThinkingTokens: number | null): Promise<void>;
+    /**
+     * Rewind tracked files to their state at a specific user message
+     */
+    rewindFiles(userMessageId: string): Promise<void>;
+    /**
+     * Send an account operation control request to CLI.
+     *
+     * @param operation - The account operation type
+     * @param data - Optional operation-specific data (required for feedback)
+     * @param timeout - Timeout in seconds (default: 30s, login: 300s)
+     * @returns AccountOperationResponse with success status and data
+     */
+    sendAccountOperation(operation: AccountOperationType, data?: Record<string, unknown>, timeout?: number): Promise<AccountOperationResponse>;
+    /**
+     * Send a tracking event to CLI.
+     *
+     * @param event - The tracking event to send (must have event_type and session_id)
+     * @param timeout - Timeout in seconds (default: 10s)
+     * @returns TrackingResponse with success status
+     */
+    sendTrackingEvent(event: TrackingEvent, timeout?: number): Promise<TrackingResponse>;
+    /**
+     * Stream input messages to transport
+     */
+    streamInput(stream: AsyncIterable<SDKUserMessage>): Promise<void>;
+    /**
+     * Receive SDK messages (not control messages)
+     */
+    receiveMessages(): AsyncIterableIterator<SDKMessage>;
+    /**
+     * Receive raw messages (for internal use)
+     */
+    receiveRawMessages(): AsyncIterableIterator<Record<string, unknown>>;
+    /**
+     * Get initialization result
+     */
+    getInitializationResult(): Record<string, unknown> | null;
+    /**
+     * Close the query and transport
+     */
+    close(): Promise<void>;
 }
 
 /**
@@ -1597,6 +1975,25 @@ declare class QoderAgentSDKClient {
      */
     login(): Promise<LoginResult>;
     /**
+     * Start login flow without opening browser.
+     *
+     * Returns the login URL for the caller to open in their own browser.
+     * After opening the URL, call waitForLoginComplete() to wait for the
+     * user to finish authentication.
+     *
+     * @returns StartLoginResult with loginUrl
+     */
+    startLogin(): Promise<StartLoginResult>;
+    /**
+     * Wait for a previously started login flow to complete.
+     *
+     * Blocks until the user finishes browser authentication.
+     * Must be called after startLogin().
+     *
+     * @returns LoginResult with success status
+     */
+    waitForLoginComplete(): Promise<LoginResult>;
+    /**
      * Logout from Qoder account using the current connection.
      *
      * Clears the current user's authentication credentials.
@@ -1629,26 +2026,6 @@ declare class QoderAgentSDKClient {
      */
     getStatus(): Promise<StatusInfo>;
     /**
-     * Submit feedback for a session using the current connection.
-     *
-     * @param content - Feedback content
-     * @param sessionId - Session ID
-     * @param workdir - Working directory
-     * @param include - Additional files to include
-     * @returns FeedbackResult with success status
-     *
-     * @example
-     * ```typescript
-     * const result = await client.feedback(
-     *   'Great experience!',
-     *   'session-abc123',
-     *   '/path/to/project',
-     *   []
-     * );
-     * ```
-     */
-    feedback(content: string, sessionId: string, workdir: string, include: string[]): Promise<FeedbackResult>;
-    /**
      * Check Qoder Work access using the current connection.
      * @returns QoderWorkAccessResult with invited status
      */
@@ -1667,6 +2044,41 @@ declare class QoderAgentSDKClient {
      */
     getUsage(): Promise<UsageInfo>;
     /**
+     * Check if case submit is enabled for the current user.
+     *
+     * Sends a heartbeat request to the server and extracts the
+     * case submit enabled status from the response.
+     *
+     * @returns CaseSubmitEnabledResult with enabled status
+     *
+     * @example
+     * ```typescript
+     * const result = await client.getCaseSubmitEnabled();
+     * if (result.enabled) {
+     *   console.log('Case submit is enabled');
+     * }
+     * ```
+     */
+    getCaseSubmitEnabled(): Promise<CaseSubmitEnabledResult>;
+    /**
+     * Get available model list.
+     *
+     * @param options - Optional filtering options
+     * @returns ModelsResult with list of available models
+     *
+     * @example
+     * ```typescript
+     * const result = await client.getModels();
+     * for (const model of result.models) {
+     *   console.log(`${model.key} - ${model.displayName}`);
+     * }
+     *
+     * // Filter by scene
+     * const filteredResult = await client.getModels({ scene: 'chat' });
+     * ```
+     */
+    getModels(options?: GetModelsOptions): Promise<ModelsResult>;
+    /**
      * Get server initialization info.
      */
     getServerInfo(): Promise<Record<string, unknown> | null>;
@@ -1674,6 +2086,15 @@ declare class QoderAgentSDKClient {
      * Receive messages until and including a ResultMessage.
      */
     receiveResponse(): AsyncIterableIterator<SDKMessage>;
+    /**
+     * Get SDK and CLI version information.
+     */
+    getVersion(): {
+        sdkVersion: string;
+        cliVersion: string;
+        sdkCommitHash: string;
+        cliCommitHash: string;
+    };
     /**
      * Disconnect from Qoder.
      */
@@ -1683,6 +2104,61 @@ declare class QoderAgentSDKClient {
      */
     [Symbol.asyncDispose](): Promise<void>;
 }
+
+/**
+ * 独立的 feedback 提交模块
+ *
+ * 通过 spawn qodercli feedback 子进程的方式提交反馈，
+ * 不依赖 SDK Client 连接（无需 connect()）。
+ */
+
+/**
+ * feedback 提交参数
+ */
+interface SubmitFeedbackParams {
+    /** 反馈内容（必填） */
+    content: string;
+    /** 会话 ID */
+    sessionId?: string;
+    /** 工作目录 */
+    workdir?: string;
+    /** 附加诊断路径列表 */
+    include?: string[];
+    /** 截图文件路径列表（最多 5 张） */
+    imagePaths?: string[];
+    /** 联系邮箱 */
+    email?: string;
+}
+/**
+ * feedback 提交选项
+ */
+interface SubmitFeedbackOptions {
+    /** qodercli 二进制路径；未提供时自动查找 */
+    cliPath?: string;
+    /** 子进程环境变量 */
+    env?: Record<string, string>;
+    /** 超时时间（毫秒），默认 60000 */
+    timeout?: number;
+    /** 存储目录；未提供时使用全局配置 configure() 中设置的 storageDir */
+    storageDir?: string;
+}
+/**
+ * 通过 qodercli feedback 子命令提交反馈。
+ *
+ * 不需要 SDK Client 连接，直接 spawn 一次性子进程完成提交。
+ *
+ * @example
+ * ```typescript
+ * import { submitFeedback } from '@ali/qoder-agent-sdk';
+ *
+ * const result = await submitFeedback(
+ *   { content: 'Great experience!', sessionId: 'abc123' },
+ *   { cliPath: '/path/to/qodercli' },
+ * );
+ * console.log(result.success, result.message);
+ * ```
+ */
+declare function submitFeedback(params: SubmitFeedbackParams, options?: SubmitFeedbackOptions): Promise<FeedbackResult>;
 
 /**
  * MCP (Model Context Protocol) utilities
@@ -1772,6 +2248,32 @@ interface CreateSdkMcpServerOptions {
 declare function createSdkMcpServer(options: CreateSdkMcpServerOptions): McpSdkServerConfigWithInstance;
 
 /**
+ * Standalone telemetry tracker utility
+ */
+
+/**
+ * TelemetryTracker provides a generic method for tracking events.
+ *
+ * @example
+ * ```typescript
+ * const tracker = new TelemetryTracker(queryHandler);
+ * await tracker.track({
+ *   event_type: 'like',
+ *   session_id: 'session-123',
+ *   message_id: 'msg-456',
+ * });
+ * ```
+ */
+declare class TelemetryTracker {
+    private queryHandler;
+    constructor(queryHandler: QueryHandler);
+    /**
+     * Send a generic tracking event
+     */
+    track(event: TrackingEvent): Promise<TrackingResponse>;
+}
+
+/**
  * Error types for Qoder Agent SDK
  */
 /**
@@ -1824,4 +2326,4 @@ declare class ControlRequestTimeoutError extends QoderAgentSDKError {
     constructor(subtype: string);
 }
 
-export { type APIAssistantMessage, type APIUserMessage, AbortError, type AccountInfo, type AdditionalFolderContent, type AgentDefinition, type AgentInput, type ApiKeySource, type AskUserQuestionInput, type AskUserQuestionOutput, type AssistantMessageContent, type AsyncHookJSONOutput, type BaseHookInput, type BashInput, type BashOutputInput, type BashOutputToolOutput, type BashToolOutput, CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, type CallToolResult, type CanUseTool, type ConfigScope, ControlRequestTimeoutError, type CreateSdkMcpServerOptions, type Dict, type EditOutput, type ExitPlanModeInput, type ExitPlanModeOutput, type ExitReason, type FeedbackResult, type FileEditInput, type FileReadInput, type FileWriteInput, type GlobInput, type GlobOutput, type GrepContentOutput, type GrepCountOutput, type GrepFilesOutput, type GrepInput, type GrepOutput, type HookCallback, type HookCallbackMatcher, type HookEvent, type HookInput, type HookJSONOutput, type ImageContent, type ImageFileOutput, IntegrationMode, type JSONSchema, type KillBashOutput, type KillShellInput, type ListMcpResourcesInput, type ListMcpResourcesOutput, type LoginResult, type LogoutResult, type McpHttpServerConfig, type McpSSEServerConfig, type McpSdkServerConfigWithInstance, type McpServer, type McpServerConfig, type McpServerStatus, type McpStdioServerConfig, type McpToolResultContent, MessageParseError, type ModelInfo, type ModelUsage, type NetworkSandboxSettings, type NonNullableUsage, type NotebookEditInput, type NotebookEditOutput, type NotebookFileOutput, type NotificationHookInput, type Options, type OutputFormatConfig, type PDFFileOutput, type PermissionBehavior, type PermissionMode, type PermissionRequestHookInput, type PermissionResult, type PermissionResultAllow, type PermissionResultDeny, type PermissionRuleValue, type PermissionUpdate, type PermissionUpdateDestination, type PostToolUseFailureHookInput, type PostToolUseHookInput, type PostToolUseHookSpecificOutput, type PreCompactHookInput, type PreToolUseHookInput, type PreToolUseHookSpecificOutput, ProcessError, QoderAgentSDKClient, QoderAgentSDKError, type QoderWorkAccessResult, type Query, type QueryParams, type RawMessageStreamEvent, type ReadMcpResourceInput, type ReadMcpResourceOutput, type ReadOutput, type SDKAssistantMessage, type SDKCompactBoundaryMessage, type SDKConfig, type SDKMessage, type SDKPartialAssistantMessage, type SDKPermissionDenial, type SDKResultMessage, type SDKResultMessageError, type SDKResultMessageSuccess, type SDKSystemMessage, type SDKUserMessage, type SDKUserMessageReplay, type SandboxIgnoreViolations, type SandboxSettings, type SdkBeta, type SdkMcpToolDefinition, type SdkPluginConfig, type SessionEndHookInput, type SessionStartHookInput, type SessionStartHookSpecificOutput, type SettingSource, type SlashCommand, SocatTransport, type SocatTransportOptions, type StatusInfo, type StopHookInput, type SubagentStartHookInput, type SubagentStopHookInput, SubprocessTransport, type SubprocessTransportOptions, type SyncHookJSONOutput, type SystemPromptConfig, type TaskOutput, type TextContent, type TextFileOutput, type ThinkingContent, type TodoWriteInput, type TodoWriteOutput, type ToolInput, type ToolOutput, type ToolPermissionContext, type ToolResultContent, type ToolUseContent, type ToolsConfig, type Transport, type UUID, type Usage, type UsageInfo, type UserMessageContent, type UserPromptSubmitHookInput, type UserPromptSubmitHookSpecificOutput, type UserQuota, VERSION, type WebFetchInput, type WebFetchOutput, type WebSearchInput, type WebSearchOutput, type WriteOutput, configure, createSdkMcpServer, query, tool };
+export { type APIAssistantMessage, type APIUserMessage, AbortError, type AccountInfo, type AdditionalFolderContent, type AgentDefinition, type AgentInput, type ApiKeySource, type AskUserQuestionInput, type AskUserQuestionOutput, type AssistantMessageContent, type AsyncHookJSONOutput, type BaseHookInput, type BashInput, type BashOutputInput, type BashOutputToolOutput, type BashToolOutput, CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, type CallToolResult, type CanUseTool, type CaseSubmitEnabledResult, type ConfigScope, ControlRequestTimeoutError, type CreateSdkMcpServerOptions, type Dict, type EditOutput, type ExitPlanModeInput, type ExitPlanModeOutput, type ExitReason, type FeedbackResult, type FileEditInput, type FileReadInput, type FileWriteInput, type GetModelsOptions, type GlobInput, type GlobOutput, type GrepContentOutput, type GrepCountOutput, type GrepFilesOutput, type GrepInput, type GrepOutput, type HookCallback, type HookCallbackMatcher, type HookEvent, type HookInput, type HookJSONOutput, type ILogger, type ImageContent, type ImageFileOutput, IntegrationMode, type IsConnectableOptions, type JSONSchema, type KillBashOutput, type KillShellInput, type ListMcpResourcesInput, type ListMcpResourcesOutput, LogLevel, type LoggerConfig, type LoginResult, type LogoutResult, type McpHttpServerConfig, type McpSSEServerConfig, type McpSdkServerConfigWithInstance, type McpServer, type McpServerConfig, type McpServerStatus, type McpStdioServerConfig, type McpToolResultContent, MessageParseError, type ModelConfig, type ModelInfo, type ModelUsage, type ModelsResult, type NetworkSandboxSettings, type NonNullableUsage, type NotebookEditInput, type NotebookEditOutput, type NotebookFileOutput, type NotificationHookInput, type Options, type OutputFormatConfig, type PDFFileOutput, type PermissionBehavior, type PermissionMode, type PermissionRequestHookInput, type PermissionResult, type PermissionResultAllow, type PermissionResultDeny, type PermissionRuleValue, type PermissionUpdate, type PermissionUpdateDestination, type PostToolUseFailureHookInput, type PostToolUseHookInput, type PostToolUseHookSpecificOutput, type PreCompactHookInput, type PreToolUseHookInput, type PreToolUseHookSpecificOutput, ProcessError, QoderAgentSDKClient, QoderAgentSDKError, type QoderWorkAccessResult, type Query, type QueryParams, type RawMessageStreamEvent, type ReadMcpResourceInput, type ReadMcpResourceOutput, type ReadOutput, type SDKAssistantMessage, type SDKCompactBoundaryMessage, type SDKConfig, type SDKMessage, type SDKPartialAssistantMessage, type SDKPermissionDenial, type SDKResultMessage, type SDKResultMessageError, type SDKResultMessageSuccess, type SDKSystemMessage, type SDKUserMessage, type SDKUserMessageReplay, type SandboxIgnoreViolations, type SandboxSettings, type SdkBeta, type SdkMcpToolDefinition, type SdkPluginConfig, type SessionEndHookInput, type SessionStartHookInput, type SessionStartHookSpecificOutput, type SettingSource, type SlashCommand, type StartLoginResult, type StatusInfo, type StopHookInput, type SubagentStartHookInput, type SubagentStopHookInput, type SubmitFeedbackOptions, type SubmitFeedbackParams, SubprocessTransport, type SubprocessTransportOptions, type SyncHookJSONOutput, type SystemPromptConfig, type TaskOutput, TcpTransport, type TcpTransportOptions, TelemetryTracker, type TextContent, type TextFileOutput, type ThinkingContent, type TodoWriteInput, type TodoWriteOutput, type ToolInput, type ToolOutput, type ToolPermissionContext, type ToolResultContent, type ToolUseContent, type ToolsConfig, type TrackingEvent, type TrackingResponse, type Transport, type UUID, type Usage, type UsageInfo, type UserMessageContent, type UserPromptSubmitHookInput, type UserPromptSubmitHookSpecificOutput, type UserQuota, VERSION, type WebFetchInput, type WebFetchOutput, type WebSearchInput, type WebSearchOutput, type WriteOutput, configure, configureLogger, createSdkMcpServer, isConnectable, logger, query, submitFeedback, tool };

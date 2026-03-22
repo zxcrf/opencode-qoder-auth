@@ -2,60 +2,148 @@ import type {
   LanguageModelV2,
   LanguageModelV2CallOptions,
   LanguageModelV2Content,
-  LanguageModelV2FunctionTool,
   LanguageModelV2FinishReason,
-  LanguageModelV2ProviderDefinedTool,
   LanguageModelV2StreamPart,
   LanguageModelV2Usage,
   ProviderV2,
 } from '@ai-sdk/provider'
 
-import { query } from './vendor/qoder-agent-sdk.mjs'
-import type { SDKMessage } from './vendor/qoder-agent-sdk.mjs'
-import { existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
 import os from 'node:os'
-import { buildPromptFromOptions } from './prompt-builder.js'
+import path from 'node:path'
+import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 
-/**
- * 过滤 @ali/qoder-agent-sdk 打到 console 的 [SDK] 系列日志，避免污染 opencode 界面。
- * 在模块加载时立即安装，永久生效，只屏蔽 SDK 特征前缀的行。
- */
-function installSdkLogFilter(): void {
-  const origLog = console.log
-  const origError = console.error
+import {
+  configure,
+  IntegrationMode,
+  QoderAgentSDKClient,
+} from './vendor/qoder-agent-sdk.mjs'
 
-  const isSdkLine = (...args: unknown[]) => {
-    const first = String(args[0] ?? '')
-    return (
-      first.startsWith('[SDK]') ||
-      first.startsWith('Platform:') ||
-      first.startsWith('Spawn options:')
-    )
-  }
+import { buildStringPrompt } from './prompt-builder.js'
 
-  console.log = (...args: unknown[]) => {
-    if (!isSdkLine(...args)) origLog(...args)
-  }
-  console.error = (...args: unknown[]) => {
-    if (!isSdkLine(...args)) origError(...args)
-  }
-}
+// ── SDK 全局配置 — 使用 ~/.qoder 认证目录，Quest 模式 ─────────────────────────
+configure({
+  storageDir: path.join(os.homedir(), '.qoder'),
+  integrationMode: IntegrationMode.Quest,
+})
 
-// 模块加载即生效
-installSdkLogFilter()
+// ── qodercli 二进制路径解析 ───────────────────────────────────────────────────
 
-/** 查找 Qoder CLI 可执行文件路径（绕过 SDK 内部的 __dirname 问题） */
 function resolveQoderCLI(): string | undefined {
-  const qoderDir = join(os.homedir(), '.qoder', 'bin', 'qodercli')
-  if (!existsSync(qoderDir)) return undefined
-  // 读取目录下所有条目，找名字包含 qodercli 的可执行文件，取版本最新的
-  const entries = readdirSync(qoderDir).filter((e) => e.startsWith('qodercli-'))
-  if (entries.length === 0) return undefined
-  entries.sort()
-  const cli = join(qoderDir, entries[entries.length - 1])
-  return existsSync(cli) ? cli : undefined
+  // 优先：~/.qoder/bin/qodercli/qodercli-<version>
+  const binDir = path.join(os.homedir(), '.qoder', 'bin', 'qodercli')
+  if (fs.existsSync(binDir)) {
+    try {
+      const entries = fs
+        .readdirSync(binDir)
+        .filter((f) => f.startsWith('qodercli-'))
+        .sort()
+        .reverse()
+      const latest = entries[0]
+      if (latest) {
+        const p = path.join(binDir, latest)
+        if (fs.existsSync(p)) return p
+      }
+    } catch { /* ignore */ }
+  }
+  return undefined
 }
+
+// ── MCP server config 转换 ────────────────────────────────────────────────────
+
+type McpServerConfig =
+  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
+
+function buildMcpServers(
+  options: LanguageModelV2CallOptions,
+): Record<string, McpServerConfig> {
+  const result: Record<string, McpServerConfig> = {}
+
+  // 从 providerOptions.qoder.mcpServers 提取
+  const providerOptions = getQoderProviderOptions(options.providerOptions)
+  if (isRecord(providerOptions?.mcpServers)) {
+    for (const [name, cfg] of Object.entries(providerOptions.mcpServers)) {
+      const normalized = normalizeMcpConfig(cfg)
+      if (normalized) result[name] = normalized
+    }
+  }
+
+  // 从 tools 中的 provider-defined 提取
+  for (const tool of options.tools ?? []) {
+    if (tool.type !== 'provider-defined') continue
+    const name = inferServerName(tool)
+    const cfg = normalizeMcpConfig(tool.args)
+    if (name && cfg && !result[name]) result[name] = cfg
+  }
+
+  return result
+}
+
+function getQoderProviderOptions(
+  providerOptions: LanguageModelV2CallOptions['providerOptions'],
+): { mcpServers?: Record<string, unknown> } | undefined {
+  if (!isRecord(providerOptions)) return undefined
+  const q = providerOptions.qoder
+  return isRecord(q) ? (q as { mcpServers?: Record<string, unknown> }) : undefined
+}
+
+function inferServerName(tool: { id: string; name: string; args: unknown }): string | undefined {
+  const args = isRecord(tool.args) ? tool.args : undefined
+  const explicit =
+    pickString(args?.serverName) ??
+    pickString(args?.mcpServerName) ??
+    pickString(args?.server) ??
+    pickString(args?.name)
+  if (explicit) return explicit
+  const [, suffix] = tool.id.split('.', 2)
+  return suffix || tool.name
+}
+
+function normalizeMcpConfig(config: unknown): McpServerConfig | null {
+  if (!isRecord(config)) return null
+  if (config.enabled === false) return null
+
+  if (Array.isArray(config.command) && config.command.every((v) => typeof v === 'string')) {
+    if (config.command.length === 0) return null
+    const [command, ...args] = config.command as string[]
+    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
+    return { command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
+  }
+
+  if (typeof config.command === 'string') {
+    const args = pickStringArray(config.args)
+    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
+    return {
+      command: config.command,
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+    }
+  }
+
+  const url = pickString(config.url) ?? pickString(config.endpoint)
+  if (url) {
+    const headers = pickStringRecord(config.headers)
+    return {
+      type: config.type === 'sse' ? 'sse' : 'http',
+      url,
+      ...(headers ? { headers } : {}),
+    }
+  }
+
+  if (isRecord(config.mcpServer)) return normalizeMcpConfig(config.mcpServer)
+  if (isRecord(config.serverConfig)) return normalizeMcpConfig(config.serverConfig)
+
+  return null
+}
+
+// ── Prompt builder ────────────────────────────────────────────────────────────
+
+function buildPrompt(options: LanguageModelV2CallOptions): string {
+  return buildStringPrompt(options.prompt)
+}
+
+// ── LanguageModelV2 实现 ──────────────────────────────────────────────────────
 
 export class QoderLanguageModel implements LanguageModelV2 {
   readonly specificationVersion = 'v2' as const
@@ -88,15 +176,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
     }
 
     const content: LanguageModelV2Content[] = text ? [{ type: 'text', text }] : []
-
     return {
       content,
       finishReason,
-      usage: usage ?? {
-        inputTokens: undefined,
-        outputTokens: undefined,
-        totalTokens: undefined,
-      },
+      usage: usage ?? { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined },
       warnings: [],
     }
   }
@@ -104,191 +187,106 @@ export class QoderLanguageModel implements LanguageModelV2 {
   async doStream(options: LanguageModelV2CallOptions): Promise<{
     stream: ReadableStream<LanguageModelV2StreamPart>
   }> {
-    const prompt = buildPromptFromOptions(options)
-
+    const prompt = buildPrompt(options)
+    const mcpServers = buildMcpServers(options)
     const cliPath = resolveQoderCLI()
-    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath)
-
-    const qoderQuery = query({
-      prompt,
-      options: qoderOptions,
-    })
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start: async (controller) => {
+        const textId = '0'
+        let textStarted = false
+        let hasFinish = false
+
+        const enqueueFinish = (
+          finishReason: LanguageModelV2FinishReason,
+          usage?: LanguageModelV2Usage,
+        ) => {
+          if (hasFinish) return
+          if (textStarted) {
+            controller.enqueue({ type: 'text-end', id: textId })
+            textStarted = false
+          }
+          controller.enqueue({
+            type: 'finish',
+            finishReason,
+            usage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          })
+          hasFinish = true
+        }
+
+        const client = new QoderAgentSDKClient({
+          model: this.modelId,
+          cwd: process.cwd(),
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          disallowedTools: ['*'],
+          ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
+          ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+        })
+
         try {
-          let hasFinish = false
-          let textBlockCounter = 0
-          let sawStreamEventText = false
-          let sawStreamEventTool = false
-          const activeStreamTextBlocks = new Set<number>()
-          const streamToolBlocks = new Map<number, { id: string; name: string; input: string }>()
-          const pendingToolCalls = new Map<string, { toolName: string; input: string }>()
+          await client.connect()
+          await client.query(prompt, randomUUID())
 
-          for await (const msg of qoderQuery) {
-            if (msg.type === 'stream_event') {
-              const ev = msg.event
+          for await (const msg of client.receiveMessages()) {
+            const m = msg as Record<string, unknown>
 
-              if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
-                sawStreamEventTool = true
-                const toolName = normalizeToolName(ev.content_block.name)
-                streamToolBlocks.set(ev.index, {
-                  id: ev.content_block.id,
-                  name: toolName,
-                  input: '',
-                })
-                controller.enqueue({
-                  type: 'tool-input-start',
-                  id: ev.content_block.id,
-                  toolName,
-                  providerExecuted: true,
-                })
-              } else if (ev.type === 'content_block_delta') {
-                if (ev.delta.type === 'text_delta' && ev.delta.text) {
-                  sawStreamEventText = true
-                  const textId = String(ev.index ?? 0)
-                  if (!activeStreamTextBlocks.has(ev.index)) {
-                    activeStreamTextBlocks.add(ev.index)
-                    controller.enqueue({ type: 'text-start', id: textId })
-                  }
-                  controller.enqueue({ type: 'text-delta', id: textId, delta: ev.delta.text })
-                } else if (ev.delta.type === 'input_json_delta' && ev.delta.partial_json != null) {
-                  const toolBlock = streamToolBlocks.get(ev.index)
-                  if (toolBlock) {
-                    toolBlock.input += ev.delta.partial_json
-                    controller.enqueue({
-                      type: 'tool-input-delta',
-                      id: toolBlock.id,
-                      delta: ev.delta.partial_json,
-                    })
-                  }
-                }
-              } else if (ev.type === 'content_block_stop') {
-                const toolBlock = streamToolBlocks.get(ev.index)
-                if (toolBlock) {
-                  controller.enqueue({ type: 'tool-input-end', id: toolBlock.id })
-                  controller.enqueue({
-                    type: 'tool-call',
-                    toolCallId: toolBlock.id,
-                    toolName: toolBlock.name,
-                    input: toolBlock.input,
-                    providerExecuted: true,
-                  })
-                  pendingToolCalls.set(toolBlock.id, {
-                    toolName: toolBlock.name,
-                    input: toolBlock.input,
-                  })
-                  streamToolBlocks.delete(ev.index)
-                } else if (activeStreamTextBlocks.has(ev.index)) {
-                  const textId = String(ev.index ?? 0)
-                  controller.enqueue({ type: 'text-end', id: textId })
-                  activeStreamTextBlocks.delete(ev.index)
-                }
-              }
-            }
-
-            if (msg.type === 'assistant') {
-              for (const block of msg.message.content) {
-                if (block.type === 'text' && block.text && !sawStreamEventText) {
-                  const textId = String(textBlockCounter++)
+            if (m.type === 'stream_event') {
+              // 增量文本 delta
+              const event = m.event as Record<string, unknown> | undefined
+              if (
+                event?.type === 'content_block_delta' &&
+                isRecord(event.delta) &&
+                event.delta.type === 'text_delta' &&
+                typeof event.delta.text === 'string' &&
+                event.delta.text
+              ) {
+                if (!textStarted) {
                   controller.enqueue({ type: 'text-start', id: textId })
-                  controller.enqueue({ type: 'text-delta', id: textId, delta: block.text })
-                  controller.enqueue({ type: 'text-end', id: textId })
-                } else if (block.type === 'tool_use' && !sawStreamEventTool) {
-                  const toolName = normalizeToolName(block.name)
-                  const inputJson = JSON.stringify(block.input ?? {})
-                  controller.enqueue({
-                    type: 'tool-input-start',
-                    id: block.id,
-                    toolName,
-                    providerExecuted: true,
-                  })
-                  controller.enqueue({
-                    type: 'tool-input-delta',
-                    id: block.id,
-                    delta: inputJson,
-                  })
-                  controller.enqueue({ type: 'tool-input-end', id: block.id })
-                  controller.enqueue({
-                    type: 'tool-call',
-                    toolCallId: block.id,
-                    toolName,
-                    input: inputJson,
-                    providerExecuted: true,
-                  })
-                  pendingToolCalls.set(block.id, { toolName, input: inputJson })
+                  textStarted = true
                 }
+                controller.enqueue({ type: 'text-delta', id: textId, delta: event.delta.text })
               }
-            }
+            } else if (m.type === 'result') {
+              // 会话结束
+              const isError =
+                m.is_error === true ||
+                (typeof m.subtype === 'string' && m.subtype !== 'success')
 
-            if (msg.type === 'user') {
-              for (const block of msg.message.content) {
-                if (block.type !== 'tool_result') continue
-                const toolCall = pendingToolCalls.get(block.tool_use_id)
-                if (!toolCall) continue
-
+              if (isError) {
+                const errMsg =
+                  typeof m.subtype === 'string' ? m.subtype : 'error_during_execution'
                 controller.enqueue({
-                  type: 'tool-result',
-                  toolCallId: block.tool_use_id,
-                  toolName: toolCall.toolName,
-                  result: normalizeToolResultContent(toolCall.toolName, block.content),
-                  providerExecuted: true,
+                  type: 'error',
+                  error: new Error(`Qoder SDK: ${errMsg}`),
                 })
-                pendingToolCalls.delete(block.tool_use_id)
-              }
-            }
-
-            const finish = extractFinish(msg)
-            if (finish) {
-              for (const [toolCallId, toolCall] of pendingToolCalls) {
-                controller.enqueue({
-                  type: 'tool-result',
-                  toolCallId,
-                  toolName: toolCall.toolName,
-                  result: normalizeToolResultContent(toolCall.toolName, null),
-                  providerExecuted: true,
+                enqueueFinish('error')
+              } else {
+                const usage = m.usage as {
+                  input_tokens: number
+                  output_tokens: number
+                } | undefined
+                enqueueFinish('stop', {
+                  inputTokens: usage?.input_tokens ?? 0,
+                  outputTokens: usage?.output_tokens ?? 0,
+                  totalTokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
                 })
               }
-              pendingToolCalls.clear()
-              for (const index of streamToolBlocks.keys()) {
-                streamToolBlocks.delete(index)
-              }
-              for (const index of activeStreamTextBlocks) {
-                controller.enqueue({ type: 'text-end', id: String(index) })
-              }
-              activeStreamTextBlocks.clear()
-              controller.enqueue(finish)
-              hasFinish = true
             }
-
-            const err = extractError(msg)
-            if (err) {
-              controller.enqueue(err)
-              if (!hasFinish) {
-                controller.enqueue({
-                  type: 'finish',
-                  finishReason: 'error',
-                  usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-                })
-                hasFinish = true
-              }
-            }
+            // type: 'assistant' (完整消息块) — stream_event 已经覆盖增量，忽略
+            // type: 'user' / 'system' — 忽略
           }
 
-          // 如果 qoderQuery 正常结束但没有 result 消息，补 finish
+          if (!hasFinish) enqueueFinish('stop')
+          controller.close()
+        } catch (err) {
           if (!hasFinish) {
             controller.enqueue({
-              type: 'finish',
-              finishReason: 'stop',
-              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              type: 'error',
+              error: err instanceof Error ? err : new Error(String(err)),
             })
+            enqueueFinish('error')
           }
-          controller.close()
-        } catch (error) {
-          controller.enqueue({
-            type: 'error',
-            error: error instanceof Error ? error : new Error(String(error)),
-          })
           controller.close()
         }
       },
@@ -298,201 +296,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
   }
 }
 
-/**
- * 从一条 SDKMessage 中提取 finish part（仅 result 消息会产生）
- */
-function extractFinish(msg: SDKMessage): Extract<LanguageModelV2StreamPart, { type: 'finish' }> | null {
-  if (msg.type !== 'result') return null
-  const inputTokens = msg.usage?.input_tokens ?? 0
-  const outputTokens = msg.usage?.output_tokens ?? 0
-  return {
-    type: 'finish',
-    finishReason: msg.subtype === 'success' ? 'stop' : 'error',
-    usage: {
-      inputTokens,
-      outputTokens,
-      totalTokens: inputTokens + outputTokens,
-    },
-  }
-}
-
-function normalizeToolName(name: string): string {
-  const lower = name.toLowerCase()
-  if (lower === 'askuserquestion') return 'question'
-  return lower
-}
-
-function normalizeToolResultContent(toolName: string, content: unknown): {
-  output: string
-  title: string
-  metadata: Record<string, unknown>
-} {
-  return {
-    output: typeof content === 'string' ? content : JSON.stringify(content ?? null, null, 2),
-    title: toolName,
-    metadata: {},
-  }
-}
-
-/**
- * 从一条 SDKMessage 中提取 error part（暂无 Qoder SDK 错误消息类型）
- */
-function extractError(_msg: SDKMessage): Extract<LanguageModelV2StreamPart, { type: 'error' }> | null {
-  return null
-}
-
-type QoderMcpServerConfig =
-  | {
-      type?: 'stdio'
-      command: string
-      args?: string[]
-      env?: Record<string, string>
-    }
-  | {
-      type: 'http' | 'sse'
-      url: string
-      headers?: Record<string, string>
-    }
-
-type QoderProviderOptions = {
-  mcpServers?: Record<string, unknown>
-}
-
-function buildQoderQueryOptions(
-  options: LanguageModelV2CallOptions,
-  modelId: string,
-  cliPath?: string,
-): {
-  model: string
-  allowDangerouslySkipPermissions: true
-  permissionMode: 'bypassPermissions'
-  pathToQoderCLIExecutable?: string
-  mcpServers?: Record<string, QoderMcpServerConfig>
-} {
-  const providerOptions = getQoderProviderOptions(options.providerOptions)
-  const mcpServers = {
-    ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),
-    ...extractMcpServersFromTools(options.tools),
-  }
-
-  return {
-    model: modelId,
-    allowDangerouslySkipPermissions: true,
-    permissionMode: 'bypassPermissions',
-    ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
-    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-  }
-}
-
-function getQoderProviderOptions(
-  providerOptions: LanguageModelV2CallOptions['providerOptions'],
-): QoderProviderOptions | undefined {
-  if (!isRecord(providerOptions)) return undefined
-  const qoderOptions = providerOptions.qoder
-  return isRecord(qoderOptions) ? (qoderOptions as QoderProviderOptions) : undefined
-}
-
-function extractMcpServersFromProviderOptions(
-  mcpServers: unknown,
-): Record<string, QoderMcpServerConfig> {
-  if (!isRecord(mcpServers)) return {}
-
-  const normalizedEntries = Object.entries(mcpServers)
-    .map(([name, config]) => [name, normalizeMcpServerConfig(config)] as const)
-    .filter((entry): entry is [string, QoderMcpServerConfig] => entry[1] != null)
-
-  return Object.fromEntries(normalizedEntries)
-}
-
-function extractMcpServersFromTools(
-  tools: LanguageModelV2CallOptions['tools'],
-): Record<string, QoderMcpServerConfig> {
-  if (!tools || tools.length === 0) return {}
-
-  const servers: Record<string, QoderMcpServerConfig> = {}
-
-  for (const tool of tools) {
-    if (tool.type !== 'provider-defined') continue
-
-    const serverName = inferProviderDefinedToolServerName(tool)
-    const serverConfig = inferProviderDefinedToolServerConfig(tool)
-    if (!serverName || !serverConfig) continue
-
-    servers[serverName] = serverConfig
-  }
-
-  return servers
-}
-
-function inferProviderDefinedToolServerName(tool: LanguageModelV2ProviderDefinedTool): string | undefined {
-  const args = isRecord(tool.args) ? tool.args : undefined
-  const explicitName =
-    pickString(args?.serverName) ??
-    pickString(args?.mcpServerName) ??
-    pickString(args?.server) ??
-    pickString(args?.name)
-
-  if (explicitName) return explicitName
-
-  const [, suffix] = tool.id.split('.', 2)
-  return suffix || tool.name
-}
-
-function inferProviderDefinedToolServerConfig(
-  tool: LanguageModelV2ProviderDefinedTool,
-): QoderMcpServerConfig | null {
-  return normalizeMcpServerConfig(tool.args)
-}
-
-function normalizeMcpServerConfig(config: unknown): QoderMcpServerConfig | null {
-  if (!isRecord(config)) return null
-  if (config.enabled === false) return null
-
-  if (Array.isArray(config.command) && config.command.every((value) => typeof value === 'string')) {
-    if (config.command.length === 0) return null
-
-    const [command, ...args] = config.command
-    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
-
-    return {
-      command,
-      ...(args.length > 0 ? { args } : {}),
-      ...(env ? { env } : {}),
-    }
-  }
-
-  if (typeof config.command === 'string') {
-    const args = pickStringArray(config.args)
-    const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
-
-    return {
-      ...(config.type === 'stdio' ? { type: 'stdio' as const } : {}),
-      command: config.command,
-      ...(args && args.length > 0 ? { args } : {}),
-      ...(env ? { env } : {}),
-    }
-  }
-
-  const url = pickString(config.url) ?? pickString(config.endpoint)
-  if (url) {
-    const headers = pickStringRecord(config.headers)
-    return {
-      type: config.type === 'sse' ? 'sse' : 'http',
-      url,
-      ...(headers ? { headers } : {}),
-    }
-  }
-
-  if (isRecord(config.mcpServer)) {
-    return normalizeMcpServerConfig(config.mcpServer)
-  }
-
-  if (isRecord(config.serverConfig)) {
-    return normalizeMcpServerConfig(config.serverConfig)
-  }
-
-  return null
-}
+// ── Utility helpers ───────────────────────────────────────────────────────────
 
 function pickString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
@@ -506,13 +310,17 @@ function pickStringArray(value: unknown): string[] | undefined {
 
 function pickStringRecord(value: unknown): Record<string, string> | undefined {
   if (!isRecord(value)) return undefined
-  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  const entries = Object.entries(value).filter(
+    (e): e is [string, string] => typeof e[1] === 'string',
+  )
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+// ── Provider factory ──────────────────────────────────────────────────────────
 
 export function createQoderProvider(): ProviderV2 {
   return {

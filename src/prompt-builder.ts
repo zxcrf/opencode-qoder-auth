@@ -119,7 +119,7 @@ function serializeMessage(message: LanguageModelV2Message): string {
 }
 
 /** 纯文本模式：将完整对话历史序列化为结构化字符串 */
-function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
+export function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
   const parts: string[] = []
 
   for (const message of prompt) {

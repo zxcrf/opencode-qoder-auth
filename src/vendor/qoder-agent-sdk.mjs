@@ -1,16 +1,22 @@
-import { spawn } from 'child_process';
-import { createInterface } from 'readline';
-import * as path from 'path';
 import * as fs from 'fs';
+import * as path2 from 'path';
 import * as os from 'os';
+import { spawn, execFile } from 'child_process';
+import { createInterface } from 'readline';
+import * as net from 'net';
 import { createHash } from 'crypto';
 
 // package.json
 var package_default = {
-  version: "0.0.24"};
+  version: "0.0.44",
+  qoderCliVersion: "0.1.34",
+  qoderCliCommitHash: "d4d23c5e59520efb89c966c08504f4ed521a4272"};
 
 // src/version.ts
 var VERSION = package_default.version;
+var CLI_VERSION = package_default.qoderCliVersion;
+var SDK_COMMIT_HASH = "afabaa8a3f3bdafe72c3a81cd3d449e0e20d2fdb" ;
+var CLI_COMMIT_HASH = package_default.qoderCliCommitHash;
 
 // src/config.ts
 var IntegrationMode = /* @__PURE__ */ ((IntegrationMode2) => {
@@ -25,6 +31,285 @@ function configure(config) {
 function getConfig() {
   return { ...globalConfig };
 }
+var DEFAULT_CONFIG = {
+  directory: path2.join(os.homedir(), ".qoder", "logs"),
+  filename: "qoder-agent-sdk-typescript.log",
+  maxSize: 10 * 1024 * 1024,
+  // 10MB
+  retentionDays: 7
+};
+var LogRotator = class {
+  config;
+  logFilePath;
+  initialized = false;
+  initError = null;
+  constructor(config = {}) {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.logFilePath = path2.join(this.config.directory, this.config.filename);
+  }
+  /**
+   * Ensure log directory exists and initialize rotator
+   */
+  initialize() {
+    if (this.initialized) {
+      return this.initError === null;
+    }
+    try {
+      if (!fs.existsSync(this.config.directory)) {
+        fs.mkdirSync(this.config.directory, { recursive: true });
+      }
+      this.cleanup();
+      this.initialized = true;
+      return true;
+    } catch (err) {
+      this.initError = err;
+      console.error(`[SDK Logger] Failed to initialize log directory: ${err.message}`);
+      this.initialized = true;
+      return false;
+    }
+  }
+  /**
+   * Get the current log file path
+   */
+  getLogFilePath() {
+    return this.logFilePath;
+  }
+  /**
+   * Check if rotation is needed and perform if necessary
+   */
+  rotateIfNeeded() {
+    if (this.initError) return;
+    try {
+      if (!fs.existsSync(this.logFilePath)) {
+        return;
+      }
+      const stats = fs.statSync(this.logFilePath);
+      if (stats.size >= this.config.maxSize) {
+        this.rotate();
+      }
+    } catch {
+    }
+  }
+  /**
+   * Rotate the current log file
+   */
+  rotate() {
+    try {
+      const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+      const baseName = path2.basename(this.config.filename, ".log");
+      const rotatedName = `${baseName}.${timestamp}.log`;
+      const rotatedPath = path2.join(this.config.directory, rotatedName);
+      fs.renameSync(this.logFilePath, rotatedPath);
+    } catch {
+    }
+  }
+  /**
+   * Clean up old log files beyond retention period
+   */
+  cleanup() {
+    if (this.initError) return;
+    try {
+      const files = fs.readdirSync(this.config.directory);
+      const baseName = path2.basename(this.config.filename, ".log");
+      const pattern = new RegExp(`^${baseName}\\.\\d{4}-\\d{2}-\\d{2}T[\\d-]+\\.log$`);
+      const cutoffDate = /* @__PURE__ */ new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - this.config.retentionDays);
+      for (const file of files) {
+        if (!pattern.test(file)) continue;
+        const filePath = path2.join(this.config.directory, file);
+        try {
+          const stats = fs.statSync(filePath);
+          if (stats.mtime < cutoffDate) {
+            fs.unlinkSync(filePath);
+          }
+        } catch {
+        }
+      }
+    } catch {
+    }
+  }
+  /**
+   * Append content to log file
+   */
+  append(content) {
+    if (this.initError) return;
+    try {
+      this.rotateIfNeeded();
+      fs.appendFileSync(this.logFilePath, content);
+    } catch {
+    }
+  }
+};
+
+// src/logger.ts
+var LogLevel = /* @__PURE__ */ ((LogLevel2) => {
+  LogLevel2[LogLevel2["DEBUG"] = 0] = "DEBUG";
+  LogLevel2[LogLevel2["INFO"] = 1] = "INFO";
+  LogLevel2[LogLevel2["WARN"] = 2] = "WARN";
+  LogLevel2[LogLevel2["ERROR"] = 3] = "ERROR";
+  return LogLevel2;
+})(LogLevel || {});
+var LOG_LEVEL_NAMES = {
+  [0 /* DEBUG */]: "DEBUG",
+  [1 /* INFO */]: "INFO",
+  [2 /* WARN */]: "WARN",
+  [3 /* ERROR */]: "ERROR"
+};
+var MAX_QUEUE_SIZE = 1e3;
+var FLUSH_INTERVAL_MS = 100;
+var FLUSH_THRESHOLD = 50;
+var LoggerImpl = class {
+  config;
+  rotator = null;
+  queue = [];
+  flushTimer = null;
+  flushing = false;
+  initialized = false;
+  constructor() {
+    this.config = {
+      enabled: true,
+      level: 1 /* INFO */,
+      directory: "",
+      filename: "qoder-agent-sdk-typescript.log",
+      maxSize: 10 * 1024 * 1024,
+      retentionDays: 7
+    };
+    this.registerExitHandlers();
+  }
+  /**
+   * Configure the logger
+   */
+  configure(config) {
+    this.config = {
+      ...this.config,
+      ...config
+    };
+    if (this.initialized) {
+      this.stopFlushTimer();
+      this.rotator = null;
+      this.initialized = false;
+    }
+  }
+  /**
+   * Initialize the logger lazily
+   */
+  ensureInitialized() {
+    if (this.initialized) {
+      return this.rotator !== null;
+    }
+    this.initialized = true;
+    if (!this.config.enabled) {
+      return false;
+    }
+    this.rotator = new LogRotator({
+      ...this.config.directory ? { directory: this.config.directory } : {},
+      filename: this.config.filename,
+      maxSize: this.config.maxSize,
+      retentionDays: this.config.retentionDays
+    });
+    const success = this.rotator.initialize();
+    if (!success) {
+      this.rotator = null;
+      return false;
+    }
+    this.startFlushTimer();
+    return true;
+  }
+  Debug(message, context, meta) {
+    this.log(0 /* DEBUG */, message, context, meta);
+  }
+  Info(message, context, meta) {
+    this.log(1 /* INFO */, message, context, meta);
+  }
+  Warn(message, context, meta) {
+    this.log(2 /* WARN */, message, context, meta);
+  }
+  Error(message, context, meta) {
+    this.log(3 /* ERROR */, message, context, meta);
+  }
+  log(level, message, context, meta) {
+    if (level < this.config.level) {
+      return;
+    }
+    if (!this.config.enabled) {
+      return;
+    }
+    if (!this.ensureInitialized()) {
+      return;
+    }
+    const entry = {
+      timestamp: /* @__PURE__ */ new Date(),
+      level,
+      message,
+      context,
+      meta
+    };
+    if (this.queue.length < MAX_QUEUE_SIZE) {
+      this.queue.push(entry);
+    }
+    if (this.queue.length >= FLUSH_THRESHOLD) {
+      this.flushSync();
+    }
+  }
+  /**
+   * Format a log entry to string
+   */
+  formatEntry(entry) {
+    const timestamp = entry.timestamp.toISOString();
+    const level = LOG_LEVEL_NAMES[entry.level];
+    const context = entry.context ? ` [${entry.context}]` : "";
+    const meta = entry.meta ? ` ${JSON.stringify(entry.meta)}` : "";
+    return `[${timestamp}] [${level}]${context} ${entry.message}${meta}
+`;
+  }
+  /**
+   * Synchronous flush for immediate writes
+   */
+  flushSync() {
+    if (this.flushing || this.queue.length === 0 || !this.rotator) {
+      return;
+    }
+    this.flushing = true;
+    try {
+      const entries = this.queue.splice(0, this.queue.length);
+      const content = entries.map((e) => this.formatEntry(e)).join("");
+      this.rotator.append(content);
+    } finally {
+      this.flushing = false;
+    }
+  }
+  /**
+   * Async flush - returns promise for explicit flush calls
+   */
+  async flush() {
+    this.flushSync();
+  }
+  startFlushTimer() {
+    if (this.flushTimer) return;
+    this.flushTimer = setInterval(() => {
+      this.flushSync();
+    }, FLUSH_INTERVAL_MS);
+    this.flushTimer.unref();
+  }
+  stopFlushTimer() {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+  registerExitHandlers() {
+    const onExit = () => {
+      this.flushSync();
+    };
+    process.on("exit", onExit);
+    process.on("beforeExit", onExit);
+  }
+};
+var loggerInstance = new LoggerImpl();
+function configureLogger(config) {
+  loggerInstance.configure(config);
+}
+var logger = loggerInstance;
 
 // src/errors.ts
 var QoderAgentSDKError = class extends Error {
@@ -92,69 +377,6 @@ var ControlRequestTimeoutError = class extends QoderAgentSDKError {
   }
 };
 
-function buildPreparedPromptFromMessages(messages, createTempFile) {
-  const promptParts = [];
-  const attachments = [];
-  if (!Array.isArray(messages)) {
-    return {
-      promptText: "Please analyze the attached file(s).",
-      attachments
-    };
-  }
-  for (const msg of messages) {
-    if (!msg || typeof msg !== "object" || msg.type !== "user") {
-      continue;
-    }
-    const content = msg.message?.content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    const textParts = [];
-    for (const block of content) {
-      if (!block || typeof block !== "object") {
-        continue;
-      }
-      if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-        textParts.push(block.text);
-      } else if (block.type === "image") {
-        const source = block.source;
-        if (source?.type === "base64" && typeof source.data === "string" && source.data.length > 0) {
-          attachments.push(createTempFile(source.data, source.media_type));
-        }
-      }
-    }
-    if (textParts.length > 0) {
-      promptParts.push(textParts.join("\n"));
-    }
-  }
-  return {
-    promptText: promptParts.join("\n\n").trim() || "Please analyze the attached file(s).",
-    attachments
-  };
-}
-function mediaTypeToExtension(mediaType) {
-  switch ((mediaType || "").toLowerCase()) {
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-    case "image/jpg":
-      return ".jpg";
-    case "image/webp":
-      return ".webp";
-    case "image/gif":
-      return ".gif";
-    case "application/pdf":
-      return ".pdf";
-    default:
-      return "";
-  }
-}
-async function* replayMessages(messages) {
-  for (const message of messages) {
-    yield message;
-  }
-}
-
 // src/internal/subprocess-transport.ts
 var DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024;
 process.platform === "win32" ? 8e3 : 1e5;
@@ -171,21 +393,28 @@ var SubprocessTransport = class {
   maxBufferSize;
   tempFiles = [];
   writeLock = false;
-  preparedPromptText = null;
-  preparedAttachments = [];
-  usePreparedNonStreaming = false;
+  _disconnectPromise;
+  _disconnectReject;
   constructor({ prompt, options }) {
     this.prompt = prompt;
     this.isStreaming = typeof prompt !== "string";
     this.options = options;
     if (options.pathToQoderCLIExecutable) {
       this.cliPath = options.pathToQoderCLIExecutable;
-      console.log(`[SDK] Using Qoder CLI from options.pathToQoderCLIExecutable: ${this.cliPath}`);
+      logger.Info(`Using Qoder CLI from options.pathToQoderCLIExecutable: ${this.cliPath}`, "SubprocessTransport");
     } else {
       this.cliPath = this.findCli();
     }
     this.cwd = options.cwd;
     this.maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
+    this.resetDisconnectPromise();
+  }
+  resetDisconnectPromise() {
+    this._disconnectPromise = new Promise((_, reject) => {
+      this._disconnectReject = reject;
+    });
+    this._disconnectPromise.catch(() => {
+    });
   }
   /**
    * Find Qoder CLI binary
@@ -193,51 +422,51 @@ var SubprocessTransport = class {
   findCli() {
     const bundledCli = this.findBundledCli();
     if (bundledCli) {
-      console.log(`[SDK] Using Qoder CLI from bundled: ${bundledCli}`);
+      logger.Info(`Using Qoder CLI from bundled: ${bundledCli}`, "SubprocessTransport");
       return bundledCli;
     }
     const envPath = process.env.PATH || "";
-    const pathDirs = envPath.split(path.delimiter);
-    const cliName = process.platform === "win32" ? "qoder.exe" : "qoder";
+    const pathDirs = envPath.split(path2.delimiter);
+    const cliName = process.platform === "win32" ? "qodercli.exe" : "qodercli";
     for (const dir of pathDirs) {
-      const cliPath = path.join(dir, cliName);
+      const cliPath = path2.join(dir, cliName);
       if (fs.existsSync(cliPath)) {
-        console.log(`[SDK] Using Qoder CLI from PATH: ${cliPath}`);
+        logger.Info(`Using Qoder CLI from PATH: ${cliPath}`, "SubprocessTransport");
         return cliPath;
       }
     }
     const homeDir = os.homedir();
     const locations = [
-      path.join(homeDir, ".npm-global", "bin", "qoder"),
-      "/usr/local/bin/qoder",
-      path.join(homeDir, ".local", "bin", "qoder"),
-      path.join(homeDir, "node_modules", ".bin", "qoder"),
-      path.join(homeDir, ".yarn", "bin", "qoder"),
-      path.join(homeDir, ".qoder", "local", "qoder")
+      path2.join(homeDir, ".npm-global", "bin", "qodercli"),
+      "/usr/local/bin/qodercli",
+      path2.join(homeDir, ".local", "bin", "qodercli"),
+      path2.join(homeDir, "node_modules", ".bin", "qodercli"),
+      path2.join(homeDir, ".yarn", "bin", "qodercli"),
+      path2.join(homeDir, ".qoder", "local", "qodercli")
     ];
     for (const loc of locations) {
       if (fs.existsSync(loc)) {
-        console.log(`[SDK] Using Qoder CLI from common location: ${loc}`);
+        logger.Info(`Using Qoder CLI from common location: ${loc}`, "SubprocessTransport");
         return loc;
       }
     }
     throw new CLINotFoundError(
       `Qoder CLI not found. Install with:
-  npm install -g @anthropic-ai/qoder-code
+  npm install -g @qoder-ai/qodercli
 
 If already installed locally, try:
   export PATH="$HOME/node_modules/.bin:$PATH"
 
 Or provide the path via options:
-  options.pathToQoderCLIExecutable = '/path/to/qoder-cli'`
+  options.pathToQoderCLIExecutable = '/path/to/qodercli'`
     );
   }
   /**
    * Find bundled CLI binary if it exists
    */
   findBundledCli() {
-    const cliName = process.platform === "win32" ? "qoder.exe" : "qoder";
-    const bundledPath = path.join(__dirname, "..", "_bundled", cliName);
+    const cliName = process.platform === "win32" ? "qodercli.exe" : "qodercli";
+    const bundledPath = path2.join(__dirname, "..", "_bundled", cliName);
     if (fs.existsSync(bundledPath)) {
       return bundledPath;
     }
@@ -315,6 +544,9 @@ Or provide the path via options:
     if (this.options.resumeSessionAt) {
       cmd.push("--resume-session-at", this.options.resumeSessionAt);
     }
+    if (this.options.sessionId && !this.options.resume) {
+      cmd.push("--session-id", this.options.sessionId);
+    }
     const settingsValue = this.buildSettingsValue();
     if (settingsValue) {
       cmd.push("--settings", settingsValue);
@@ -386,23 +618,19 @@ Or provide the path via options:
     if (this.options.outputFormat && this.options.outputFormat.type === "json_schema") {
       cmd.push("--json-schema", JSON.stringify(this.options.outputFormat.schema));
     }
-    if (this.usePreparedNonStreaming) {
-      for (const attachment of this.preparedAttachments) {
-        cmd.push("--attachment", attachment);
-      }
-      cmd.push("--print", this.preparedPromptText ?? "Please analyze the attached file(s).");
-    } else if (this.isStreaming) {
+    if (this.isStreaming) {
       cmd.push("--input-format", "stream-json");
     } else {
       cmd.push("--print", String(this.prompt));
     }
-    console.log(`[SDK] Running command: ${cmd.join(" ")}`);
+    logger.Debug(`Running command: ${cmd.join(" ")}`, "SubprocessTransport");
     return cmd;
   }
   async connect() {
     if (this.process) {
       return;
     }
+    this.resetDisconnectPromise();
     const cmd = this.buildCommand();
     try {
       const processEnv = {
@@ -422,9 +650,9 @@ Or provide the path via options:
         processEnv.PWD = this.cwd;
       }
       const [executable, ...args] = cmd;
-      console.log(`[SDK] Spawning subprocess: ${executable}`);
-      console.log(`[SDK] Working directory: ${this.cwd || process.cwd()}`);
-      console.log(`Platform: ${process.platform}`);
+      logger.Debug(`Spawning subprocess: ${executable}`, "SubprocessTransport");
+      logger.Debug(`Working directory: ${this.cwd || process.cwd()}`, "SubprocessTransport");
+      logger.Debug(`Platform: ${process.platform}`, "SubprocessTransport");
       const spawnOptions = {
         cwd: this.cwd,
         env: processEnv,
@@ -434,14 +662,14 @@ Or provide the path via options:
         // Only use detached on non-Windows platforms
         detached: process.platform !== "win32"
       };
-      console.log(`Spawn options:`, JSON.stringify({
+      logger.Debug(`Spawn options`, "SubprocessTransport", {
         windowsHide: spawnOptions.windowsHide,
         shell: spawnOptions.shell,
         detached: spawnOptions.detached,
         stdio: spawnOptions.stdio
-      }));
+      });
       this.process = spawn(executable, args, spawnOptions);
-      console.log(`[SDK] Subprocess spawned with PID: ${this.process.pid}`);
+      logger.Debug(`Subprocess spawned with PID: ${this.process.pid}`, "SubprocessTransport");
       if (this.process.stdout) {
         this.stdoutReader = createInterface({
           input: this.process.stdout,
@@ -455,7 +683,7 @@ Or provide the path via options:
           crlfDelay: Infinity
         });
         stderrReader.on("line", (line) => {
-          console.error(`[SDK] stderr: ${line}`);
+          logger.Debug(`stderr: ${line}`, "SubprocessTransport");
           stderrBuffer.push(line);
           if (stderrBuffer.length > 50) {
             stderrBuffer.shift();
@@ -466,63 +694,68 @@ Or provide the path via options:
         });
       }
       this.process.on("error", (err) => {
-        console.error(`[SDK] Subprocess error event:`, err);
-        console.error(`[SDK] Executable path: ${executable}`);
-        console.error(`[SDK] Error code: ${err.code}`);
+        logger.Error(`Subprocess error event: ${err.message}`, "SubprocessTransport", {
+          executable,
+          errorCode: err.code
+        });
         if (err.code === "ENOENT") {
-          console.error(`[SDK] Executable not found at path: ${executable}`);
+          logger.Error(`Executable not found at path: ${executable}`, "SubprocessTransport");
         } else if (err.code === "EACCES") {
-          console.error(`[SDK] Permission denied for executable: ${executable}`);
+          logger.Error(`Permission denied for executable: ${executable}`, "SubprocessTransport");
         }
         if (stderrBuffer.length > 0) {
-          console.error(`[SDK] Stderr output before error:
-${stderrBuffer.join("\n")}`);
+          logger.Error(`Stderr output before error:
+${stderrBuffer.join("\n")}`, "SubprocessTransport");
         }
         this.exitError = new CLIConnectionError(`Failed to start Qoder: ${err.message}`);
         this.ready = false;
       });
       this.process.on("exit", (code, signal) => {
-        console.log(`[SDK] Subprocess exited with code: ${code}, signal: ${signal}`);
-        if (code !== null && code !== 0) {
-          console.error(`[SDK] Subprocess failed with exit code: ${code}`);
-          console.error(`[SDK] CLI path used: ${executable}`);
-          console.error(`[SDK] Arguments: ${args.join(" ")}`);
-          console.error(`[SDK] Working directory: ${this.cwd || process.cwd()}`);
-          console.error(`[SDK] Environment QODER_ENTRYPOINT: ${processEnv.QODER_ENTRYPOINT}`);
-          if (processEnv.QODERCLI_INTEGRATION_MODE) {
-            console.error(`[SDK] Environment QODERCLI_INTEGRATION_MODE: ${processEnv.QODERCLI_INTEGRATION_MODE}`);
-          }
+        if (code !== 1) {
+          logger.Info(`Subprocess exited with code: ${code}, signal: ${signal}`, "SubprocessTransport");
+        }
+        if (code !== null && code !== 0 && code !== 1) {
+          logger.Error(`Subprocess failed with exit code: ${code}`, "SubprocessTransport", {
+            cliPath: executable,
+            args: args.join(" "),
+            workingDirectory: this.cwd || process.cwd(),
+            QODER_ENTRYPOINT: processEnv.QODER_ENTRYPOINT,
+            QODERCLI_INTEGRATION_MODE: processEnv.QODERCLI_INTEGRATION_MODE
+          });
           if (stderrBuffer.length > 0) {
-            console.error(`[SDK] Stderr output (${stderrBuffer.length} lines):
-${stderrBuffer.join("\n")}`);
+            logger.Error(`Stderr output (${stderrBuffer.length} lines):
+${stderrBuffer.join("\n")}`, "SubprocessTransport");
           } else {
-            console.error(`[SDK] No stderr output captured`);
+            logger.Error(`No stderr output captured`, "SubprocessTransport");
           }
           this.exitError = new ProcessError("Command failed", code);
         }
         this.ready = false;
+        const exitErr = this.exitError || new CLIConnectionError(`CLI process exited (code: ${code}, signal: ${signal})`);
+        this._disconnectReject(exitErr);
       });
-      if ((!this.isStreaming || this.usePreparedNonStreaming) && this.process.stdin) {
+      if (!this.isStreaming && this.process.stdin) {
         this.process.stdin.end();
       }
       this.ready = true;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      console.error(`[SDK] Failed to spawn subprocess:`, error);
-      console.error(`[SDK] CLI path: ${this.cliPath}`);
-      console.error(`[SDK] Working directory: ${this.cwd || "not set"}`);
+      logger.Error(`Failed to spawn subprocess: ${error.message}`, "SubprocessTransport", {
+        cliPath: this.cliPath,
+        workingDirectory: this.cwd || "not set"
+      });
       if (this.cwd && !fs.existsSync(this.cwd)) {
-        console.error(`[SDK] Working directory does not exist: ${this.cwd}`);
+        logger.Error(`Working directory does not exist: ${this.cwd}`, "SubprocessTransport");
         throw new CLIConnectionError(`Working directory does not exist: ${this.cwd}`);
       }
       if (!fs.existsSync(this.cliPath)) {
-        console.error(`[SDK] CLI executable not found at: ${this.cliPath}`);
+        logger.Error(`CLI executable not found at: ${this.cliPath}`, "SubprocessTransport");
       } else {
         try {
           const stats = fs.statSync(this.cliPath);
-          console.error(`[SDK] CLI file stats - mode: ${stats.mode.toString(8)}, size: ${stats.size}`);
+          logger.Error(`CLI file stats - mode: ${stats.mode.toString(8)}, size: ${stats.size}`, "SubprocessTransport");
         } catch (statErr) {
-          console.error(`[SDK] Failed to stat CLI: ${statErr}`);
+          logger.Error(`Failed to stat CLI: ${statErr}`, "SubprocessTransport");
         }
       }
       throw new CLIConnectionError(`Failed to start Qoder: ${error.message}`);
@@ -639,31 +872,10 @@ ${stderrBuffer.join("\n")}`);
   isReady() {
     return this.ready;
   }
-  shouldUsePreparedNonStreamingMode() {
-    return this.usePreparedNonStreaming;
+  getDisconnectPromise() {
+    return this._disconnectPromise;
   }
-  createTempAttachmentFile(base64Data, mediaType) {
-    const extension = mediaTypeToExtension(mediaType);
-    const hash = createHash("sha256").update(base64Data).digest("hex").slice(0, 12);
-    const filePath = path.join(
-      os.tmpdir(),
-      `qoder-sdk-attachment-${process.pid}-${Date.now()}-${hash}${extension}`
-    );
-    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
-    this.tempFiles.push(filePath);
-    return filePath;
-  }
-  async queryPrepare(messages) {
-    const prepared = buildPreparedPromptFromMessages(
-      messages,
-      (base64Data, mediaType) => this.createTempAttachmentFile(base64Data, mediaType)
-    );
-    if (prepared.attachments.length === 0) {
-      return;
-    }
-    this.preparedPromptText = prepared.promptText;
-    this.preparedAttachments = prepared.attachments;
-    this.usePreparedNonStreaming = true;
+  async queryPrepare(_messages) {
   }
 };
 
@@ -955,7 +1167,7 @@ var QueryHandler = class {
     if (this.readingMessages) return;
     this.readingMessages = true;
     this.readMessagesLoop().catch((err) => {
-      console.error("Fatal error in message reader:", err);
+      logger.Error(`Fatal error in message reader: ${err}`, "QueryHandler");
       this.enqueueMessage({ type: "error", error: String(err) });
     });
   }
@@ -967,6 +1179,9 @@ var QueryHandler = class {
       for await (const message of this.transport.readMessages()) {
         if (this.closed) break;
         const msgType = message.type;
+        if (msgType !== "assistant" && msgType !== "user" && msgType !== "partial_assistant") {
+          logger.Info(`Received message: ${msgType}`, "QueryHandler", message);
+        }
         if (msgType === "control_response") {
           const controlResponse = message;
           const response = controlResponse.response;
@@ -984,7 +1199,7 @@ var QueryHandler = class {
         }
         if (msgType === "control_request") {
           this.handleControlRequest(message).catch((err) => {
-            console.error("Error handling control request:", err);
+            logger.Error(`Error handling control request: ${err}`, "QueryHandler");
           });
           continue;
         }
@@ -1136,6 +1351,7 @@ var QueryHandler = class {
       request_id: requestId,
       request
     };
+    logger.Info(`Sending control request: ${request.subtype}`, "QueryHandler", controlRequest);
     await this.transport.write(JSON.stringify(controlRequest) + "\n");
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => {
@@ -1143,7 +1359,8 @@ var QueryHandler = class {
         reject(new ControlRequestTimeoutError(request.subtype));
       }, timeout * 1e3);
     });
-    return Promise.race([responsePromise, timeoutPromise]);
+    const exitPromise = this.transport.getDisconnectPromise();
+    return Promise.race([responsePromise, timeoutPromise, exitPromise]);
   }
   /**
    * Handle an MCP request for an SDK server
@@ -1260,7 +1477,7 @@ var QueryHandler = class {
    * @returns AccountOperationResponse with success status and data
    */
   async sendAccountOperation(operation, data, timeout) {
-    const effectiveTimeout = timeout ?? (operation === "login" ? 300 : 30);
+    const effectiveTimeout = timeout ?? (operation === "login" || operation === "complete_login" ? 300 : 30);
     const request = {
       subtype: "account_operation",
       operation
@@ -1276,6 +1493,37 @@ var QueryHandler = class {
       data: opResponse.data,
       error: opResponse.error
     };
+  }
+  /**
+   * Send a tracking event to CLI.
+   *
+   * @param event - The tracking event to send (must have event_type and session_id)
+   * @param timeout - Timeout in seconds (default: 10s)
+   * @returns TrackingResponse with success status
+   */
+  async sendTrackingEvent(event, timeout = 10) {
+    const request = {
+      subtype: "tracking_event",
+      ...event
+    };
+    logger.Debug("sendTrackingEvent: sending request", "QueryHandler", request);
+    try {
+      const response = await this.sendControlRequest(request, timeout);
+      logger.Debug("sendTrackingEvent: received response", "QueryHandler", response);
+      const trackingResponse = response;
+      return {
+        success: trackingResponse.success ?? !trackingResponse.error,
+        event_type: trackingResponse.event_type ?? event.event_type,
+        error: trackingResponse.error
+      };
+    } catch (err) {
+      logger.Debug(`sendTrackingEvent: error occurred: ${err}`, "QueryHandler");
+      return {
+        success: false,
+        event_type: event.event_type,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
   }
   /**
    * Stream input messages to transport
@@ -1307,7 +1555,7 @@ var QueryHandler = class {
       }
       await this.transport.endInput();
     } catch (err) {
-      console.debug("Error streaming input:", err);
+      logger.Debug(`Error streaming input: ${err}`, "QueryHandler");
     }
   }
   /**
@@ -1398,66 +1646,35 @@ function query(params) {
     }
     configuredOptions = { ...configuredOptions, permissionPromptToolName: "stdio" };
   }
-  let transport = null;
-  let queryHandler = null;
-  let runtime = null;
-  async function prepareRuntime() {
-    if (runtime) {
-      return runtime;
-    }
-    let preparedPrompt = finalPrompt;
-    let effectiveStreamingMode = isStreamingMode;
-    let preparedMessages = null;
-    if (isStreamingMode) {
-      preparedMessages = [];
-      for await (const message of finalPrompt) {
-        preparedMessages.push(message);
+  const transport = customTransport ?? new SubprocessTransport({
+    prompt: finalPrompt,
+    options: configuredOptions
+  });
+  const sdkMcpServers = {};
+  if (configuredOptions.mcpServers) {
+    for (const [name, config] of Object.entries(configuredOptions.mcpServers)) {
+      if ("type" in config && config.type === "sdk" && "instance" in config) {
+        sdkMcpServers[name] = config.instance;
       }
     }
-    preparedPrompt = preparedMessages ? replayMessages(preparedMessages) : finalPrompt;
-    transport = customTransport ?? new SubprocessTransport({
-      prompt: preparedPrompt,
-      options: configuredOptions
-    });
-    if (preparedMessages && transport instanceof SubprocessTransport) {
-      await transport.queryPrepare(preparedMessages);
-      preparedPrompt = replayMessages(preparedMessages);
-      if (typeof transport.shouldUsePreparedNonStreamingMode === "function" && transport.shouldUsePreparedNonStreamingMode()) {
-        effectiveStreamingMode = false;
-      }
-    }
-    const sdkMcpServers = {};
-    if (configuredOptions.mcpServers) {
-      for (const [name, config] of Object.entries(configuredOptions.mcpServers)) {
-        if ("type" in config && config.type === "sdk" && "instance" in config) {
-          sdkMcpServers[name] = config.instance;
-        }
-      }
-    }
-    queryHandler = new QueryHandler({
-      transport,
-      isStreamingMode: effectiveStreamingMode,
-      canUseTool: configuredOptions.canUseTool,
-      hooks: configuredOptions.hooks,
-      sdkMcpServers
-    });
-    runtime = {
-      prompt: preparedPrompt,
-      isStreamingMode: effectiveStreamingMode
-    };
-    return runtime;
   }
+  const queryHandler = new QueryHandler({
+    transport,
+    isStreamingMode,
+    canUseTool: configuredOptions.canUseTool,
+    hooks: configuredOptions.hooks,
+    sdkMcpServers
+  });
   let started = false;
   async function* createGenerator() {
     try {
-      const preparedRuntime = await prepareRuntime();
       await transport.connect();
       await queryHandler.start();
-      if (preparedRuntime.isStreamingMode) {
+      if (isStreamingMode) {
         await queryHandler.initialize();
       }
-      if (preparedRuntime.isStreamingMode) {
-        queryHandler.streamInput(preparedRuntime.prompt).catch(() => {
+      if (isStreamingMode) {
+        queryHandler.streamInput(finalPrompt).catch(() => {
         });
       }
       started = true;
@@ -1485,8 +1702,7 @@ function query(params) {
     },
     // Query-specific methods
     async interrupt() {
-      const preparedRuntime = await prepareRuntime();
-      if (!preparedRuntime.isStreamingMode) {
+      if (!isStreamingMode) {
         throw new Error("interrupt() is only available in streaming mode");
       }
       await queryHandler.interrupt();
@@ -1500,30 +1716,24 @@ function query(params) {
       await queryHandler.rewindFiles(userMessageUuid);
     },
     async setPermissionMode(mode) {
-      const preparedRuntime = await prepareRuntime();
-      if (!preparedRuntime.isStreamingMode) {
+      if (!isStreamingMode) {
         throw new Error("setPermissionMode() is only available in streaming mode");
       }
       await queryHandler.setPermissionMode(mode);
     },
     async setModel(model) {
-      const preparedRuntime = await prepareRuntime();
-      if (!preparedRuntime.isStreamingMode) {
+      if (!isStreamingMode) {
         throw new Error("setModel() is only available in streaming mode");
       }
       await queryHandler.setModel(model);
     },
     async setMaxThinkingTokens(maxThinkingTokens) {
-      const preparedRuntime = await prepareRuntime();
-      if (!preparedRuntime.isStreamingMode) {
+      if (!isStreamingMode) {
         throw new Error("setMaxThinkingTokens() is only available in streaming mode");
       }
       await queryHandler.setMaxThinkingTokens(maxThinkingTokens);
     },
     async supportedCommands() {
-      if (!queryHandler) {
-        return [];
-      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.commands) {
         return initResult.commands;
@@ -1531,9 +1741,6 @@ function query(params) {
       return [];
     },
     async supportedModels() {
-      if (!queryHandler) {
-        return [];
-      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.models) {
         return initResult.models;
@@ -1541,9 +1748,6 @@ function query(params) {
       return [];
     },
     async mcpServerStatus() {
-      if (!queryHandler) {
-        return [];
-      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.mcp_servers) {
         return initResult.mcp_servers;
@@ -1551,9 +1755,6 @@ function query(params) {
       return [];
     },
     async accountInfo() {
-      if (!queryHandler) {
-        return {};
-      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.account) {
         return initResult.account;
@@ -1564,89 +1765,189 @@ function query(params) {
   return queryObject;
 }
 var DEFAULT_MAX_BUFFER_SIZE2 = 1024 * 1024;
-var DEFAULT_SOCAT_COMMAND = "/Applications/QoderWork.app/Contents/Resources/bin/socat";
-var DEFAULT_CHAT_ENDPOINT = "192.168.64.10:1024";
-var SocatTransport = class {
+var DEFAULT_CHAT_ENDPOINT = process.platform === "win32" ? "//./pipe/qoderwork-chat" : "/tmp/qoderwork-chat.sock";
+var LOG_TAG = "TcpTransport";
+function isWindowsNamedPipe(endpoint) {
+  return endpoint.startsWith("\\\\.\\pipe\\") || endpoint.startsWith("//./pipe/");
+}
+function resolveEndpoint(endpoint) {
+  if (isWindowsNamedPipe(endpoint)) {
+    return { type: "pipe", path: endpoint };
+  }
+  if (endpoint.startsWith("/")) {
+    return { type: "unix", path: endpoint };
+  }
+  const lastColon = endpoint.lastIndexOf(":");
+  if (lastColon === -1) {
+    throw new Error(`Invalid endpoint format: "${endpoint}", expected "host:port", "/path/to/socket", or "\\\\.\\pipe\\name"`);
+  }
+  const host = endpoint.substring(0, lastColon);
+  const port = parseInt(endpoint.substring(lastColon + 1), 10);
+  if (isNaN(port) || port <= 0 || port > 65535) {
+    throw new Error(`Invalid port in endpoint: "${endpoint}"`);
+  }
+  return { type: "tcp", host, port };
+}
+function endpointToString(ep) {
+  return ep.type === "tcp" ? `${ep.host}:${ep.port}` : ep.path;
+}
+function createSocketConnection(endpoint, connectTimeoutMs = 5e3) {
+  return new Promise((resolve, reject) => {
+    const connectOpts = endpoint.type === "tcp" ? { host: endpoint.host, port: endpoint.port } : { path: endpoint.path };
+    const socket = net.createConnection(connectOpts, () => {
+      socket.removeAllListeners("error");
+      socket.setTimeout(0);
+      resolve(socket);
+    });
+    socket.setTimeout(connectTimeoutMs, () => {
+      socket.destroy(new Error(`Connection timed out after ${connectTimeoutMs}ms`));
+    });
+    socket.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+async function isConnectable(options = {}) {
+  const {
+    chatEndpoint = DEFAULT_CHAT_ENDPOINT,
+    timeoutMs = 2e3,
+    retries = 1,
+    retryDelayMs = 1e3
+  } = options;
+  const resolved = resolveEndpoint(chatEndpoint);
+  const epStr = endpointToString(resolved);
+  let lastError = null;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      logger.Debug(`CHECK retry ${attempt + 1}/${retries}`, LOG_TAG);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+    let socket = null;
+    try {
+      logger.Debug(`Connecting for CHECK: ${epStr}`, LOG_TAG);
+      socket = await createSocketConnection(resolved, timeoutMs);
+      logger.Debug(`CHECK connected to ${epStr}`, LOG_TAG);
+      const checkData = { type: "check" };
+      const checkLine = "CHECK\n" + JSON.stringify(checkData) + "\n";
+      await new Promise((resolve, reject) => {
+        socket.write(checkLine, (err) => {
+          if (err) {
+            logger.Error(`Failed to write CHECK command: ${err.message}`, LOG_TAG);
+            reject(err);
+          } else {
+            logger.Debug(`CHECK command sent successfully`, LOG_TAG);
+            resolve();
+          }
+        });
+      });
+      socket.end();
+      const responsePromise = new Promise((resolve) => {
+        const reader = createInterface({
+          input: socket,
+          crlfDelay: Infinity
+        });
+        let resolved2 = false;
+        reader.on("line", (line) => {
+          const trimmed = line.trim();
+          logger.Debug(`CHECK response: ${trimmed}`, LOG_TAG);
+          if (trimmed === "SUCCESS" && !resolved2) {
+            resolved2 = true;
+            reader.close();
+            resolve(true);
+          }
+        });
+        reader.on("close", () => {
+          if (!resolved2) {
+            resolved2 = true;
+            resolve(false);
+          }
+        });
+      });
+      const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => {
+          logger.Warn("CHECK timeout", LOG_TAG);
+          resolve(false);
+        }, timeoutMs);
+      });
+      const result = await Promise.race([responsePromise, timeoutPromise]);
+      logger.Debug(`CHECK result: ${result}`, LOG_TAG);
+      if (result) {
+        return true;
+      }
+      lastError = new Error("Check failed: no SUCCESS response");
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      logger.Error(`CHECK failed: ${lastError.message}`, LOG_TAG);
+    } finally {
+      if (socket) {
+        try {
+          socket.destroy();
+        } catch (err) {
+          logger.Error(`Error destroying CHECK socket: ${err}`, LOG_TAG);
+        }
+      }
+    }
+  }
+  logger.Error(`CHECK failed after ${retries} attempts: ${lastError?.message}`, LOG_TAG);
+  return false;
+}
+var TcpTransport = class {
   prompt;
   isStreaming;
   options;
-  process = null;
-  stdoutReader = null;
+  socket = null;
+  socketReader = null;
   ready = false;
   exitError = null;
   maxBufferSize;
   writeLock = false;
-  socatCommand;
   chatEndpoint;
-  constructor({ prompt, options, socatCommand, chatEndpoint, apiBaseUrl }) {
-    this.prompt = prompt;
+  _disconnectPromise;
+  _disconnectReject;
+  constructor({ prompt, options, chatEndpoint } = {}) {
+    this.prompt = prompt || "";
     this.isStreaming = typeof prompt !== "string";
-    this.options = options;
+    this.options = options || {};
     this.maxBufferSize = DEFAULT_MAX_BUFFER_SIZE2;
-    this.socatCommand = socatCommand || DEFAULT_SOCAT_COMMAND;
     this.chatEndpoint = chatEndpoint || DEFAULT_CHAT_ENDPOINT;
+    this.resetDisconnectPromise();
+  }
+  resetDisconnectPromise() {
+    this._disconnectPromise = new Promise((_, reject) => {
+      this._disconnectReject = reject;
+    });
+    this._disconnectPromise.catch(() => {
+    });
   }
   async connect() {
-    if (this.process) {
+    if (this.socket) {
       return;
     }
+    this.resetDisconnectPromise();
+    const resolved = resolveEndpoint(this.chatEndpoint);
+    const epStr = endpointToString(resolved);
     try {
-      const socatArgs = ["-", `TCP:${this.chatEndpoint}`];
-      console.log(`[SDK] Spawning socat: ${this.socatCommand} ${socatArgs.join(" ")}`);
-      const spawnOptions = {
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        shell: false,
-        // Only use detached on non-Windows platforms
-        detached: process.platform !== "win32"
-      };
-      this.process = spawn(this.socatCommand, socatArgs, spawnOptions);
-      console.log(`[SDK] Socat spawned with PID: ${this.process.pid}`);
-      if (this.process.stdout) {
-        this.stdoutReader = createInterface({
-          input: this.process.stdout,
-          crlfDelay: Infinity
-        });
-      }
-      let stderrBuffer = [];
-      if (this.process.stderr) {
-        const stderrReader = createInterface({
-          input: this.process.stderr,
-          crlfDelay: Infinity
-        });
-        stderrReader.on("line", (line) => {
-          stderrBuffer.push(line);
-          if (stderrBuffer.length > 50) {
-            stderrBuffer.shift();
-          }
-          if (this.options.stderr) {
-            this.options.stderr(line);
-          }
-        });
-      }
-      this.process.on("error", (err) => {
-        console.error(`[SDK] Socat error event:`, err);
-        console.error(`[SDK] Error code: ${err.code}`);
-        if (stderrBuffer.length > 0) {
-          console.error(`[SDK] Stderr output before error:
-${stderrBuffer.join("\n")}`);
-        }
-        this.exitError = new CLIConnectionError(`Failed to connect via socat: ${err.message}`);
-        this.ready = false;
+      logger.Debug(`Connecting to ${epStr}`, LOG_TAG);
+      this.socket = await createSocketConnection(resolved);
+      logger.Debug(`Connected to ${epStr}`, LOG_TAG);
+      this.socketReader = createInterface({
+        input: this.socket,
+        crlfDelay: Infinity
       });
-      this.process.on("exit", (code, signal) => {
-        console.log(`[SDK] Socat exited with code: ${code}, signal: ${signal}`);
-        if (code !== null && code !== 0) {
-          console.error(`[SDK] Socat failed with exit code: ${code}`);
-          if (stderrBuffer.length > 0) {
-            console.error(`[SDK] Stderr output:
-${stderrBuffer.join("\n")}`);
-          }
-          this.exitError = new ProcessError("Socat connection failed", code);
-        }
+      this.socket.on("error", (err) => {
+        logger.Error(`Socket error: ${err.message}`, LOG_TAG);
+        this.exitError = new CLIConnectionError(`TCP connection error: ${err.message}`);
         this.ready = false;
+        this._disconnectReject(this.exitError);
       });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      this.socket.on("close", (hadError) => {
+        logger.Info(`Socket closed${hadError ? " with error" : ""}`, LOG_TAG);
+        this.ready = false;
+        if (!hadError) {
+          const err = this.exitError || new CLIConnectionError("TCP connection closed");
+          this._disconnectReject(err);
+        }
+      });
       const initContext = {
         type: "init"
       };
@@ -1656,11 +1957,80 @@ ${stderrBuffer.join("\n")}`);
       if (this.options.model) {
         initContext.model = this.options.model;
       }
+      if (this.options.fallbackModel) {
+        initContext.fallbackModel = this.options.fallbackModel;
+      }
       if (this.options.resume) {
         initContext.resume = this.options.resume;
       }
+      if (this.options.resumeSessionAt) {
+        initContext.resumeSessionAt = this.options.resumeSessionAt;
+      }
+      if (this.options.sessionId && !this.options.resume) {
+        initContext.sessionId = this.options.sessionId;
+      }
       if (this.options.cwd) {
         initContext.cwd = this.options.cwd;
+      }
+      if (this.options.env && Object.keys(this.options.env).length > 0) {
+        initContext.env = this.options.env;
+      }
+      if (this.options.tools !== void 0) {
+        if (Array.isArray(this.options.tools)) {
+          if (this.options.tools.length === 0) {
+            initContext.tools = "";
+          } else {
+            initContext.tools = this.options.tools;
+          }
+        } else {
+          initContext.tools = "default";
+        }
+      }
+      if (this.options.allowedTools && this.options.allowedTools.length > 0) {
+        initContext.allowedTools = this.options.allowedTools;
+      }
+      if (this.options.disallowedTools && this.options.disallowedTools.length > 0) {
+        initContext.disallowedTools = this.options.disallowedTools;
+      }
+      if (this.options.maxTurns !== void 0) {
+        initContext.maxTurns = this.options.maxTurns;
+      }
+      if (this.options.maxBudgetUsd !== void 0) {
+        initContext.maxBudgetUsd = this.options.maxBudgetUsd;
+      }
+      if (this.options.maxThinkingTokens !== void 0) {
+        initContext.maxThinkingTokens = this.options.maxThinkingTokens;
+      }
+      if (this.options.permissionMode && this.options.permissionMode === "bypassPermissions") {
+        initContext.permissionMode = this.options.permissionMode;
+      }
+      if (this.options.betas && this.options.betas.length > 0) {
+        initContext.betas = this.options.betas;
+      }
+      if (this.options.continue) {
+        initContext.continue = this.options.continue;
+      }
+      if (this.options.forkSession) {
+        initContext.forkSession = this.options.forkSession;
+      }
+      if (this.options.includePartialMessages) {
+        initContext.includePartialMessages = this.options.includePartialMessages;
+      }
+      if (this.options.agents) {
+        const agentsDict = {};
+        for (const [name, agentDef] of Object.entries(this.options.agents)) {
+          const agentObj = {
+            description: agentDef.description,
+            prompt: agentDef.prompt
+          };
+          if (agentDef.tools) agentObj.tools = agentDef.tools;
+          if (agentDef.model) agentObj.model = agentDef.model;
+          agentsDict[name] = agentObj;
+        }
+        initContext.agents = agentsDict;
+      }
+      if (this.options.outputFormat && this.options.outputFormat.type === "json_schema") {
+        initContext.outputFormat = this.options.outputFormat;
       }
       if (this.options.mcpServers) {
         const serversForRemote = {};
@@ -1679,21 +2049,43 @@ ${stderrBuffer.join("\n")}`);
           initContext.mcpServers = serversForRemote;
         }
       }
-      console.log(`[SDK] Sending init context:`, JSON.stringify(initContext));
-      if (this.process.stdin) {
-        await new Promise((resolve, reject) => {
-          const line = "CHAT\n" + JSON.stringify(initContext) + "\n";
-          this.process.stdin.write(line, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        });
+      if (this.options.settingSources !== void 0) {
+        initContext.settingSources = this.options.settingSources;
       }
+      if (this.options.sandbox !== void 0) {
+        initContext.sandbox = this.options.sandbox;
+      }
+      if (this.options.storageDir) {
+        initContext.storageDir = this.options.storageDir;
+      }
+      if (this.options.resourceDir) {
+        initContext.resourceDir = this.options.resourceDir;
+      }
+      if (this.options.plugins) {
+        initContext.plugins = this.options.plugins;
+      }
+      if (this.options.integrationMode) {
+        initContext.integrationMode = this.options.integrationMode;
+      }
+      if (this.options.enableFileCheckpointing) {
+        initContext.enableFileCheckpointing = this.options.enableFileCheckpointing;
+      }
+      if (this.options.extraArgs) {
+        initContext.extraArgs = this.options.extraArgs;
+      }
+      logger.Debug(`Sending init context`, LOG_TAG, initContext);
+      await new Promise((resolve, reject) => {
+        const line = "CHAT\n" + JSON.stringify(initContext) + "\n";
+        this.socket.write(line, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
       this.ready = true;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      console.error(`[SDK] Failed to spawn socat:`, error);
-      throw new CLIConnectionError(`Failed to connect via socat: ${error.message}`);
+      logger.Error(`Failed to connect: ${error.message}`, LOG_TAG);
+      throw new CLIConnectionError(`Failed to connect to ${this.chatEndpoint}: ${error.message}`);
     }
   }
   async write(data) {
@@ -1703,20 +2095,20 @@ ${stderrBuffer.join("\n")}`);
     }
     this.writeLock = true;
     try {
-      if (!this.ready || !this.process?.stdin) {
-        throw new CLIConnectionError("SocatTransport is not ready for writing");
+      if (!this.ready || !this.socket) {
+        throw new CLIConnectionError("TcpTransport is not ready for writing");
       }
       if (this.exitError) {
         throw new CLIConnectionError(
-          `Cannot write to process that exited with error: ${this.exitError.message}`
+          `Cannot write to socket that closed with error: ${this.exitError.message}`
         );
       }
       await new Promise((resolve, reject) => {
-        this.process.stdin.write(data, (err) => {
+        this.socket.write(data, (err) => {
           if (err) {
             this.ready = false;
             this.exitError = new CLIConnectionError(
-              `Failed to write to socat stdin: ${err.message}`
+              `Failed to write to TCP socket: ${err.message}`
             );
             reject(this.exitError);
           } else {
@@ -1729,12 +2121,12 @@ ${stderrBuffer.join("\n")}`);
     }
   }
   async *readMessages() {
-    if (!this.process || !this.stdoutReader) {
+    if (!this.socket || !this.socketReader) {
       throw new CLIConnectionError("Not connected");
     }
     let jsonBuffer = "";
     try {
-      for await (const line of this.stdoutReader) {
+      for await (const line of this.socketReader) {
         const trimmedLine = line.trim();
         if (!trimmedLine) continue;
         jsonBuffer += trimmedLine;
@@ -1759,46 +2151,39 @@ ${stderrBuffer.join("\n")}`);
         throw err;
       }
     }
-    if (this.process.exitCode !== null && this.process.exitCode !== 0) {
-      throw new ProcessError(
-        "Socat connection failed",
-        this.process.exitCode,
-        "Check stderr output for details"
+    if (this.exitError) {
+      throw new CLIConnectionError(
+        `TCP connection failed: ${this.exitError.message}`
       );
     }
   }
   async close() {
-    if (!this.process) {
+    if (!this.socket) {
       this.ready = false;
       return;
     }
     this.ready = false;
-    if (this.process.stdin) {
-      try {
-        this.process.stdin.end();
-      } catch {
-      }
+    if (this.socketReader) {
+      this.socketReader.close();
+      this.socketReader = null;
     }
-    if (this.stdoutReader) {
-      this.stdoutReader.close();
-      this.stdoutReader = null;
-    }
-    if (this.process.exitCode === null) {
-      this.process.kill("SIGTERM");
-    }
-    this.process = null;
+    this.socket.destroy();
+    this.socket = null;
     this.exitError = null;
   }
   async endInput() {
-    if (this.process?.stdin) {
+    if (this.socket) {
       try {
-        this.process.stdin.end();
+        this.socket.end();
       } catch {
       }
     }
   }
   isReady() {
     return this.ready;
+  }
+  getDisconnectPromise() {
+    return this._disconnectPromise;
   }
   async queryPrepare(messages) {
     const additionalPaths = [];
@@ -1822,55 +2207,45 @@ ${stderrBuffer.join("\n")}`);
       }
     }
     if (additionalPaths.length === 0) {
-      console.debug("[SDK] queryPrepare: no additional directories to mount");
+      logger.Debug("queryPrepare: no additional directories to mount", LOG_TAG);
       return;
     }
     const mountData = {
       additionalDirectories: additionalPaths,
       cwd: this.options.cwd
     };
-    console.log(`[SDK] Sending MOUNT command:`, JSON.stringify(mountData));
-    let mountProcess = null;
+    logger.Debug(`Sending MOUNT command`, LOG_TAG, mountData);
+    const resolved = resolveEndpoint(this.chatEndpoint);
+    const epStr = endpointToString(resolved);
+    let mountSocket = null;
     try {
-      const socatArgs = ["-", `TCP:${this.chatEndpoint}`];
-      console.log(`[SDK] Spawning socat for MOUNT: ${this.socatCommand} ${socatArgs.join(" ")}`);
-      const spawnOptions = {
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        shell: false,
-        detached: process.platform !== "win32"
-      };
-      mountProcess = spawn(this.socatCommand, socatArgs, spawnOptions);
-      console.log(`[SDK] MOUNT socat spawned with PID: ${mountProcess.pid}`);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      if (mountProcess.stdin) {
-        await new Promise((resolve, reject) => {
-          const line = "MOUNT\n" + JSON.stringify(mountData) + "\n";
-          mountProcess.stdin.write(line, (err) => {
-            if (err) {
-              console.error(`[SDK] Failed to write MOUNT command:`, err);
-              reject(new CLIConnectionError(`Failed to send MOUNT command: ${err.message}`));
-            } else {
-              console.log(`[SDK] MOUNT command sent successfully`);
-              resolve();
-            }
-          });
+      logger.Debug(`Connecting for MOUNT: ${epStr}`, LOG_TAG);
+      mountSocket = await createSocketConnection(resolved);
+      logger.Debug(`MOUNT connected to ${epStr}`, LOG_TAG);
+      await new Promise((resolve, reject) => {
+        const line = "MOUNT\n" + JSON.stringify(mountData) + "\n";
+        mountSocket.write(line, (err) => {
+          if (err) {
+            logger.Error(`Failed to write MOUNT command: ${err.message}`, LOG_TAG);
+            reject(new CLIConnectionError(`Failed to send MOUNT command: ${err.message}`));
+          } else {
+            logger.Debug(`MOUNT command sent successfully`, LOG_TAG);
+            resolve();
+          }
         });
-        mountProcess.stdin.end();
-      }
+      });
+      mountSocket.end();
       await new Promise((resolve) => setTimeout(resolve, 100));
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      console.error(`[SDK] Failed to send MOUNT command:`, error);
+      logger.Error(`Failed to send MOUNT command: ${error.message}`, LOG_TAG);
       throw new CLIConnectionError(`Failed to send MOUNT command: ${error.message}`);
     } finally {
-      if (mountProcess) {
+      if (mountSocket) {
         try {
-          if (mountProcess.exitCode === null) {
-            mountProcess.kill("SIGTERM");
-          }
+          mountSocket.destroy();
         } catch (err) {
-          console.error(`[SDK] Error killing MOUNT process:`, err);
+          logger.Error(`Error destroying MOUNT socket: ${err}`, LOG_TAG);
         }
       }
     }
@@ -1881,7 +2256,7 @@ ${stderrBuffer.join("\n")}`);
   getAccountId() {
     if (!this.options.cwd) {
       throw new CLIConnectionError(
-        "cwd is required in options for socat transport"
+        "cwd is required in options for TCP transport"
       );
     }
     return this.options.sessionId || this.generateSessionId(this.options.cwd);
@@ -2087,6 +2462,67 @@ var QoderAgentSDKClient = class {
     };
   }
   /**
+   * Start login flow without opening browser.
+   *
+   * Returns the login URL for the caller to open in their own browser.
+   * After opening the URL, call waitForLoginComplete() to wait for the
+   * user to finish authentication.
+   *
+   * @returns StartLoginResult with loginUrl
+   */
+  async startLogin() {
+    if (!this.queryHandler) {
+      throw new CLIConnectionError("Not connected. Call connect() first.");
+    }
+    const response = await this.queryHandler.sendAccountOperation("start_login");
+    if (!response.success) {
+      return {
+        success: false,
+        message: response.error ?? "Failed to start login"
+      };
+    }
+    const data = response.data;
+    if (!data?.already_logged_in && !data?.login_url) {
+      return {
+        success: false,
+        message: data?.message ?? "Failed to start login: missing login URL"
+      };
+    }
+    return {
+      success: true,
+      loginUrl: data?.login_url,
+      alreadyLoggedIn: data?.already_logged_in,
+      username: data?.username,
+      message: data?.message
+    };
+  }
+  /**
+   * Wait for a previously started login flow to complete.
+   *
+   * Blocks until the user finishes browser authentication.
+   * Must be called after startLogin().
+   *
+   * @returns LoginResult with success status
+   */
+  async waitForLoginComplete() {
+    if (!this.queryHandler) {
+      throw new CLIConnectionError("Not connected. Call connect() first.");
+    }
+    const response = await this.queryHandler.sendAccountOperation("complete_login");
+    if (!response.success) {
+      return {
+        success: false,
+        message: response.error ?? "Login failed"
+      };
+    }
+    const data = response.data;
+    return {
+      success: true,
+      message: data?.message ?? "Login successful",
+      username: data?.username
+    };
+  }
+  /**
    * Logout from Qoder account using the current connection.
    *
    * Clears the current user's authentication credentials.
@@ -2166,47 +2602,6 @@ var QoderAgentSDKClient = class {
     }
   }
   /**
-   * Submit feedback for a session using the current connection.
-   *
-   * @param content - Feedback content
-   * @param sessionId - Session ID
-   * @param workdir - Working directory
-   * @param include - Additional files to include
-   * @returns FeedbackResult with success status
-   *
-   * @example
-   * ```typescript
-   * const result = await client.feedback(
-   *   'Great experience!',
-   *   'session-abc123',
-   *   '/path/to/project',
-   *   []
-   * );
-   * ```
-   */
-  async feedback(content, sessionId, workdir, include) {
-    if (!this.queryHandler) {
-      throw new CLIConnectionError("Not connected. Call connect() first.");
-    }
-    const response = await this.queryHandler.sendAccountOperation("feedback", {
-      content,
-      session_id: sessionId,
-      workdir,
-      include
-    });
-    if (!response.success) {
-      return {
-        success: false,
-        message: response.error ?? "Feedback submission failed"
-      };
-    }
-    const data = response.data;
-    return {
-      success: true,
-      message: data?.message ?? "Feedback submitted successfully"
-    };
-  }
-  /**
    * Check Qoder Work access using the current connection.
    * @returns QoderWorkAccessResult with invited status
    */
@@ -2275,13 +2670,110 @@ var QoderAgentSDKClient = class {
           detailUrl: data.addOnQuota?.detailUrl ?? ""
         },
         isQuotaExceeded: data.isQuotaExceeded ?? false,
+        isPlanQuotaProrated: data.isPlanQuotaProrated ?? false,
         orgResourcePackage: {
-          used: data.orgResourcePackage?.used ?? 0
+          used: data.orgResourcePackage?.used ?? 0,
+          cap: data.orgResourcePackage?.cap ?? 0,
+          remaining: data.orgResourcePackage?.remaining ?? 0,
+          percentage: data.orgResourcePackage?.percentage ?? 0,
+          available: data.orgResourcePackage?.available ?? false,
+          unit: data.orgResourcePackage?.unit ?? ""
         }
       };
     } catch (err) {
       throw err instanceof CLIConnectionError ? err : new Error(
         err instanceof Error ? err.message : "Failed to get usage information"
+      );
+    }
+  }
+  /**
+   * Check if case submit is enabled for the current user.
+   *
+   * Sends a heartbeat request to the server and extracts the
+   * case submit enabled status from the response.
+   *
+   * @returns CaseSubmitEnabledResult with enabled status
+   *
+   * @example
+   * ```typescript
+   * const result = await client.getCaseSubmitEnabled();
+   * if (result.enabled) {
+   *   console.log('Case submit is enabled');
+   * }
+   * ```
+   */
+  async getCaseSubmitEnabled() {
+    if (!this.queryHandler) {
+      throw new CLIConnectionError("Not connected. Call connect() first.");
+    }
+    try {
+      const response = await this.queryHandler.sendAccountOperation("case_submit_enabled");
+      if (!response.success) {
+        return { enabled: false };
+      }
+      const data = response.data;
+      return {
+        enabled: data?.enabled ?? false
+      };
+    } catch {
+      return { enabled: false };
+    }
+  }
+  /**
+   * Get available model list.
+   *
+   * @param options - Optional filtering options
+   * @returns ModelsResult with list of available models
+   *
+   * @example
+   * ```typescript
+   * const result = await client.getModels();
+   * for (const model of result.models) {
+   *   console.log(`${model.key} - ${model.displayName}`);
+   * }
+   *
+   * // Filter by scene
+   * const filteredResult = await client.getModels({ scene: 'chat' });
+   * ```
+   */
+  async getModels(options) {
+    if (!this.queryHandler) {
+      throw new CLIConnectionError("Not connected. Call connect() first.");
+    }
+    try {
+      const response = await this.queryHandler.sendAccountOperation(
+        "models",
+        options?.scene ? { scene: options.scene } : void 0
+      );
+      if (!response.success) {
+        throw new Error(response.error ?? "Failed to get models");
+      }
+      const data = response.data;
+      if (!data) {
+        throw new Error("No models data returned from CLI");
+      }
+      const models = (data.models ?? []).map((m) => ({
+        key: m.key ?? "",
+        displayName: m.display_name ?? "",
+        format: m.format ?? "",
+        isVl: m.is_vl ?? false,
+        isReasoning: m.is_reasoning ?? false,
+        url: m.url ?? "",
+        source: m.source ?? "",
+        maxInputTokens: m.max_input_tokens ?? 0,
+        enable: m.enable ?? false,
+        priceFactor: m.price_factor ?? 0,
+        originalPriceFactor: m.original_price_factor ?? 0,
+        isDefault: m.is_default ?? false,
+        isNew: m.is_new ?? false,
+        tags: m.tags ?? [],
+        modelProvider: m.model_provider ?? "",
+        maxOutputTokens: m.max_output_tokens ?? 0
+      }));
+      return { models };
+    } catch (err) {
+      throw err instanceof CLIConnectionError ? err : new Error(
+        err instanceof Error ? err.message : "Failed to get models"
       );
     }
   }
@@ -2306,6 +2798,12 @@ var QoderAgentSDKClient = class {
     }
   }
   /**
+   * Get SDK and CLI version information.
+   */
+  getVersion() {
+    return { sdkVersion: VERSION, cliVersion: CLI_VERSION, sdkCommitHash: SDK_COMMIT_HASH, cliCommitHash: CLI_COMMIT_HASH };
+  }
+  /**
    * Disconnect from Qoder.
    */
   async disconnect() {
@@ -2322,6 +2820,108 @@ var QoderAgentSDKClient = class {
     await this.disconnect();
   }
 };
+function findCliPath() {
+  const cliName = process.platform === "win32" ? "qodercli.exe" : "qodercli";
+  const bundledPath = path2.join(__dirname, "..", "_bundled", cliName);
+  if (fs.existsSync(bundledPath)) {
+    return bundledPath;
+  }
+  const envPath = process.env.PATH || "";
+  for (const dir of envPath.split(path2.delimiter)) {
+    const p = path2.join(dir, cliName);
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  const homeDir = os.homedir();
+  const locations = [
+    path2.join(homeDir, ".qoder", "local", cliName),
+    path2.join(homeDir, ".local", "bin", cliName),
+    "/usr/local/bin/qodercli"
+  ];
+  for (const loc of locations) {
+    if (fs.existsSync(loc)) {
+      return loc;
+    }
+  }
+  throw new Error(
+    "qodercli not found. Provide cliPath option or ensure qodercli is in PATH."
+  );
+}
+async function submitFeedback(params, options) {
+  if (!params.content) {
+    return { success: false, message: "Feedback content is required" };
+  }
+  const cliPath = options?.cliPath ?? findCliPath();
+  const timeout = options?.timeout ?? 6e4;
+  const config = getConfig();
+  const storageDir = options?.storageDir ?? config.storageDir;
+  const args = ["feedback", "-c", params.content, "--json"];
+  if (storageDir) {
+    args.push("--storage-dir", storageDir);
+  }
+  if (params.sessionId) {
+    args.push("-s", params.sessionId);
+  }
+  if (params.workdir) {
+    args.push("--workdir", params.workdir);
+  }
+  if (params.email) {
+    args.push("--email", params.email);
+  }
+  if (params.include) {
+    for (const p of params.include) {
+      args.push("--include", p);
+    }
+  }
+  if (params.imagePaths) {
+    for (const p of params.imagePaths) {
+      args.push("--images", p);
+    }
+  }
+  logger.Debug("submitFeedback: spawning qodercli", "Feedback", { cliPath, args });
+  return new Promise((resolve) => {
+    execFile(
+      cliPath,
+      args,
+      {
+        env: options?.env ?? process.env,
+        timeout,
+        maxBuffer: 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        if (stderr) {
+          logger.Debug(`submitFeedback: stderr: ${stderr.trim()}`, "Feedback");
+        }
+        const trimmed = stdout.trim();
+        if (trimmed) {
+          try {
+            const json = JSON.parse(trimmed);
+            resolve({
+              success: !!json.success,
+              message: json.success ? json.message || "Feedback submitted successfully" : json.error || json.message || "Failed to submit feedback",
+              requestId: json.request_id
+            });
+            return;
+          } catch {
+          }
+        }
+        if (error) {
+          logger.Debug(`submitFeedback: error: ${error.message}`, "Feedback");
+          resolve({
+            success: false,
+            message: error.message || "Failed to submit feedback"
+          });
+        } else {
+          resolve({
+            success: true,
+            message: trimmed || "Feedback submitted successfully"
+          });
+        }
+      }
+    );
+  });
+}
 
 // src/mcp.ts
 function tool(name, description, inputSchema, handler) {
@@ -2347,6 +2947,23 @@ function createSdkMcpServer(options) {
   };
 }
 
+// src/tracking.ts
+var TelemetryTracker = class {
+  constructor(queryHandler) {
+    this.queryHandler = queryHandler;
+    logger.Debug("initialized", "TelemetryTracker");
+  }
+  /**
+   * Send a generic tracking event
+   */
+  async track(event) {
+    logger.Debug("sending tracking event", "TelemetryTracker", event);
+    const response = await this.queryHandler.sendTrackingEvent(event);
+    logger.Debug("received response", "TelemetryTracker", response);
+    return response;
+  }
+};
+
 // src/types/common.ts
 var AbortError = class extends Error {
   constructor(message) {
@@ -2355,4 +2972,5 @@ var AbortError = class extends Error {
   }
 };
 
-export { AbortError, CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, ControlRequestTimeoutError, IntegrationMode, MessageParseError, ProcessError, QoderAgentSDKClient, QoderAgentSDKError, SocatTransport, SubprocessTransport, VERSION, configure, createSdkMcpServer, query, tool };
+export { AbortError, CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, ControlRequestTimeoutError, IntegrationMode, LogLevel, MessageParseError, ProcessError, QoderAgentSDKClient, QoderAgentSDKError, SubprocessTransport, TcpTransport, TelemetryTracker, VERSION, configure, configureLogger, createSdkMcpServer, isConnectable, logger, query, submitFeedback, tool };
+
