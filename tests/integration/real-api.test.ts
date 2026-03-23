@@ -134,6 +134,131 @@ describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
 // ── context7 MCP 工具调用调试测试 ─────────────────────────────────────────────
 // 直接运行：npx vitest run tests/integration/real-api.test.ts --reporter=verbose
 
+// ── reasoning/thinking 流式透出测试 ───────────────────────────────────────────
+// 验证 stream_event thinking_delta → reasoning-start/reasoning-delta/reasoning-end 链路
+
+describe('Qoder Reasoning Streaming', { timeout: TIMEOUT }, () => {
+  it('should stream reasoning and text deltas separately with efficient model', async () => {
+    setMcpBridgeServers({})
+
+    const model = new QoderLanguageModel('efficient')
+
+    const { stream } = await model.doStream({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'What is 17 * 23? Think step by step.',
+            },
+          ],
+        },
+      ],
+    })
+
+    const reader = stream.getReader()
+    const parts: Array<{ type: string; [key: string]: unknown }> = []
+    const timestamps: Record<string, number> = {}
+    const t0 = performance.now()
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      const p = value as { type: string; [key: string]: unknown }
+      parts.push(p)
+      if (!timestamps[p.type]) {
+        timestamps[p.type] = performance.now() - t0
+      }
+    }
+
+    const reasoningStarts = parts.filter((p) => p.type === 'reasoning-start')
+    const reasoningDeltas = parts.filter((p) => p.type === 'reasoning-delta')
+    const reasoningEnds = parts.filter((p) => p.type === 'reasoning-end')
+    const textStarts = parts.filter((p) => p.type === 'text-start')
+    const textDeltas = parts.filter((p) => p.type === 'text-delta')
+    const textEnds = parts.filter((p) => p.type === 'text-end')
+    const finish = parts.find((p) => p.type === 'finish')
+
+    const reasoningText = reasoningDeltas.map((p) => p.delta as string).join('')
+    const responseText = textDeltas.map((p) => p.delta as string).join('')
+
+    console.log('\n=== Reasoning Streaming Test (efficient) ===')
+    console.log(`  reasoning-start: ${reasoningStarts.length}`)
+    console.log(`  reasoning-delta: ${reasoningDeltas.length}`)
+    console.log(`  reasoning-end: ${reasoningEnds.length}`)
+    console.log(`  text-start: ${textStarts.length}`)
+    console.log(`  text-delta: ${textDeltas.length}`)
+    console.log(`  text-end: ${textEnds.length}`)
+    console.log(`  reasoning text (first 200): "${reasoningText.slice(0, 200)}..."`)
+    console.log(`  response text (first 200): "${responseText.slice(0, 200)}..."`)
+    console.log(`  timestamps:`, timestamps)
+
+    // 验证基本流式输出
+    expect(textDeltas.length).toBeGreaterThan(0)
+    expect(finish).toBeDefined()
+    expect(responseText.length).toBeGreaterThan(0)
+
+    // 如果模型有 reasoning，验证 reasoning 事件
+    if (reasoningDeltas.length > 0) {
+      expect(reasoningStarts.length).toBeGreaterThan(0)
+      expect(reasoningEnds.length).toBeGreaterThan(0)
+      expect(reasoningText.length).toBeGreaterThan(0)
+      console.log(`  ✅ reasoning 流式透出正常！${reasoningDeltas.length} 个 delta`)
+    } else {
+      console.log(`  ℹ️ efficient 模型本次未返回 reasoning（可能不支持或未触发）`)
+    }
+
+    // 验证是真正的流式（多个 delta，不是一大块）
+    if (textDeltas.length > 1) {
+      console.log(`  ✅ text 真正流式！${textDeltas.length} 个 delta`)
+    }
+  })
+
+  it('doGenerate should include reasoning in content', async () => {
+    setMcpBridgeServers({})
+
+    const model = new QoderLanguageModel('efficient')
+
+    const result = await model.doGenerate({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'What is 7 + 5? Think step by step.',
+            },
+          ],
+        },
+      ],
+    })
+
+    console.log('\n=== doGenerate Reasoning Test (efficient) ===')
+    console.log(`  content types: ${result.content.map((c) => c.type).join(', ')}`)
+    console.log(`  finishReason: ${result.finishReason}`)
+
+    const reasoningParts = result.content.filter((c) => c.type === 'reasoning')
+    const textParts = result.content.filter((c) => c.type === 'text')
+
+    expect(textParts.length).toBeGreaterThan(0)
+    const fullText = textParts.map((c) => (c as { type: 'text'; text: string }).text).join('')
+    console.log(`  text (first 200): "${fullText.slice(0, 200)}..."`)
+
+    if (reasoningParts.length > 0) {
+      const reasoningText = (reasoningParts[0] as { type: 'reasoning'; text: string }).text
+      console.log(`  reasoning (first 200): "${reasoningText.slice(0, 200)}..."`)
+      console.log(`  ✅ doGenerate 返回了 reasoning content！`)
+    } else {
+      console.log(`  ℹ️ efficient 模型本次未返回 reasoning`)
+    }
+  })
+})
+
 describe.skip('context7 MCP tool call debug', { timeout: TIMEOUT }, () => {
   it('观察 CLI 在有 mcpServers=context7 时发出的工具名格式', async () => {
     setMcpBridgeServers({

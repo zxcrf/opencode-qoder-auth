@@ -1047,6 +1047,140 @@ describe('QoderLanguageModel', () => {
       expect(finish).toBeDefined()
       expect((finish as any).finishReason).toBe('stop')
     })
+
+    // ── reasoning/thinking 流式支持 ───────────────────────────────────────
+
+    it('stream_event thinking_delta 正确转换为 reasoning-start + reasoning-delta + reasoning-end', async () => {
+      pushThinkingBlockStart(0)
+      pushThinkingDelta('Let me think...', 0)
+      pushThinkingDelta(' step by step', 0)
+      pushContentBlockStop(0)
+      pushTextBlockStart(1)
+      pushTextDeltaWithIndex('Final answer', 1)
+      pushContentBlockStop(1)
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(buildCallOptions('Reason about this'))
+      const parts = await collectStream(stream)
+
+      // reasoning 事件
+      expect(parts.find((p) => p.type === 'reasoning-start')).toBeDefined()
+      const reasoningDeltas = parts.filter((p) => p.type === 'reasoning-delta')
+      expect(reasoningDeltas).toHaveLength(2)
+      expect(reasoningDeltas.map((p) => (p as any).delta).join('')).toBe('Let me think... step by step')
+      expect(parts.find((p) => p.type === 'reasoning-end')).toBeDefined()
+
+      // text 事件
+      expect(parts.find((p) => p.type === 'text-start')).toBeDefined()
+      const textDeltas = parts.filter((p) => p.type === 'text-delta')
+      expect(textDeltas.map((p) => (p as any).delta).join('')).toBe('Final answer')
+      expect(parts.find((p) => p.type === 'text-end')).toBeDefined()
+    })
+
+    it('thinking_delta 无 content_block_start 时自动补 reasoning-start', async () => {
+      // 直接发 thinking_delta，不先发 content_block_start（应自动补 reasoning-start）
+      pushThinkingDelta('Direct thinking', 0)
+      pushContentBlockStop(0)
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
+
+      expect(parts.find((p) => p.type === 'reasoning-start')).toBeDefined()
+      const reasoningDeltas = parts.filter((p) => p.type === 'reasoning-delta')
+      expect(reasoningDeltas).toHaveLength(1)
+      expect((reasoningDeltas[0] as any).delta).toBe('Direct thinking')
+    })
+
+    it('assistant 路径 thinking block 正确转换为 reasoning-start + reasoning-delta + reasoning-end', async () => {
+      // 走 assistant fallback（非 stream_event）
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'thinking', thinking: 'I need to analyze this carefully.' },
+            { type: 'text', text: 'Here is the answer.' },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
+
+      // reasoning 事件
+      expect(parts.find((p) => p.type === 'reasoning-start')).toBeDefined()
+      const reasoningDeltas = parts.filter((p) => p.type === 'reasoning-delta')
+      expect(reasoningDeltas).toHaveLength(1)
+      expect((reasoningDeltas[0] as any).delta).toBe('I need to analyze this carefully.')
+      expect(parts.find((p) => p.type === 'reasoning-end')).toBeDefined()
+
+      // text 事件
+      expect(parts.find((p) => p.type === 'text-start')).toBeDefined()
+      const textDeltas = parts.filter((p) => p.type === 'text-delta')
+      expect(textDeltas.map((p) => (p as any).delta).join('')).toBe('Here is the answer.')
+    })
+
+    it('stream_event reasoning 阻止 assistant fallback 重复发 thinking', async () => {
+      // 先通过 stream_event 发了 thinking_delta
+      pushThinkingDelta('streamed thinking', 0)
+      pushContentBlockStop(0)
+      // 然后 assistant 消息也有 thinking block（应忽略）
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'thinking', thinking: 'streamed thinking' },
+            { type: 'text', text: 'Answer.' },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
+
+      // 应只有一组 reasoning（来自 stream_event，不重复）
+      const reasoningStarts = parts.filter((p) => p.type === 'reasoning-start')
+      expect(reasoningStarts).toHaveLength(1)
+    })
+
+    it('result 时自动关闭未关闭的 reasoning block', async () => {
+      // thinking block 开始了但没有 content_block_stop
+      pushThinkingBlockStart(0)
+      pushThinkingDelta('incomplete thinking', 0)
+      // 直接发 result（不发 content_block_stop）
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
+
+      // 应有 reasoning-start 和 reasoning-end（自动关闭）
+      expect(parts.find((p) => p.type === 'reasoning-start')).toBeDefined()
+      expect(parts.find((p) => p.type === 'reasoning-end')).toBeDefined()
+    })
+
+    it('doGenerate 返回 reasoning + text content', async () => {
+      pushThinkingBlockStart(0)
+      pushThinkingDelta('thinking process', 0)
+      pushContentBlockStop(0)
+      pushTextBlockStart(1)
+      pushTextDeltaWithIndex('generated text', 1)
+      pushContentBlockStop(1)
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const result = await model.doGenerate(buildCallOptions('test'))
+
+      const reasoningContent = result.content.find((c) => c.type === 'reasoning')
+      expect(reasoningContent).toBeDefined()
+      expect((reasoningContent as any).text).toBe('thinking process')
+
+      const textContent = result.content.find((c) => c.type === 'text')
+      expect(textContent).toBeDefined()
+      expect((textContent as any).text).toBe('generated text')
+    })
   })
 })
 
@@ -1059,6 +1193,49 @@ function pushTextDelta(text: string) {
       type: 'content_block_delta',
       delta: { type: 'text_delta', text },
     },
+  })
+}
+
+function pushTextDeltaWithIndex(text: string, index: number) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index,
+      delta: { type: 'text_delta', text },
+    },
+  })
+}
+
+function pushTextBlockStart(index: number) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: { type: 'content_block_start', index, content_block: { type: 'text', text: '' } },
+  })
+}
+
+function pushThinkingBlockStart(index: number) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: { type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '' } },
+  })
+}
+
+function pushThinkingDelta(thinking: string, index: number) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index,
+      delta: { type: 'thinking_delta', thinking },
+    },
+  })
+}
+
+function pushContentBlockStop(index: number) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: { type: 'content_block_stop', index },
   })
 }
 
