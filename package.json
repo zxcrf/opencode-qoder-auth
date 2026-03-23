@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-plugin",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "opencode plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "index.ts",

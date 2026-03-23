@@ -23,6 +23,11 @@ export const QoderProviderPlugin: Plugin = async () => {
           temperature: m.temperature,
           tool_call: m.tool_call,
           limit: m.limit,
+          // opencode 通过 modalities.input 判断是否支持图片输入（attachment 字段不参与此判断）
+          modalities: {
+            input: m.attachment ? ['text', 'image'] : ['text'],
+            output: ['text'],
+          },
         }
       }
 

@@ -3,6 +3,7 @@ import type {
   LanguageModelV2CallOptions,
   LanguageModelV2Content,
   LanguageModelV2FinishReason,
+  LanguageModelV2ProviderDefinedTool,
   LanguageModelV2StreamPart,
   LanguageModelV2Usage,
   ProviderV2,
@@ -11,14 +12,13 @@ import type {
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { randomUUID } from 'node:crypto'
 
 import {
   configure,
-  QoderAgentSDKClient,
+  query,
 } from './vendor/qoder-agent-sdk.mjs'
 
-import { buildStringPrompt } from './prompt-builder.js'
+import { buildPromptFromOptions } from './prompt-builder.js'
 
 // ── storageDir 解析 — 优先 ~/.qoderwork（QoderWork 登录），回退 ~/.qoder ───────
 function resolveStorageDir(): string {
@@ -31,6 +31,34 @@ function resolveStorageDir(): string {
 configure({
   storageDir: resolveStorageDir(),
 })
+
+/**
+ * 过滤 @ali/qoder-agent-sdk 打到 console 的 [SDK] 系列日志，避免污染 opencode 界面。
+ * 在模块加载时立即安装，永久生效，只屏蔽 SDK 特征前缀的行。
+ */
+function installSdkLogFilter(): void {
+  const origLog = console.log
+  const origError = console.error
+
+  const isSdkLine = (...args: unknown[]) => {
+    const first = String(args[0] ?? '')
+    return (
+      first.startsWith('[SDK]') ||
+      first.startsWith('Platform:') ||
+      first.startsWith('Spawn options:')
+    )
+  }
+
+  console.log = (...args: unknown[]) => {
+    if (!isSdkLine(...args)) origLog(...args)
+  }
+  console.error = (...args: unknown[]) => {
+    if (!isSdkLine(...args)) origError(...args)
+  }
+}
+
+// 模块加载即生效
+installSdkLogFilter()
 
 // ── qodercli 二进制路径解析 ───────────────────────────────────────────────────
 
@@ -65,47 +93,100 @@ function resolveQoderCLI(): string | undefined {
   return undefined
 }
 
+// ── 工具名称标准化 ────────────────────────────────────────────────────────────
+
+function normalizeToolName(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower === 'askuserquestion') return 'question'
+  return lower
+}
+
+// ── 工具结果内容标准化 ────────────────────────────────────────────────────────
+
+function normalizeToolResultContent(
+  toolName: string,
+  content: unknown,
+): { output: string; title: string; metadata: Record<string, unknown> } {
+  return {
+    output: typeof content === 'string' ? content : JSON.stringify(content ?? null, null, 2),
+    title: toolName,
+    metadata: {},
+  }
+}
+
 // ── MCP server config 转换 ────────────────────────────────────────────────────
 
-type McpServerConfig =
+type QoderMcpServerConfig =
   | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
   | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
   | { type: 'sdk'; name: string; instance: unknown }
 
-function buildMcpServers(
+type QoderProviderOptions = {
+  mcpServers?: Record<string, unknown>
+}
+
+function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
-): Record<string, McpServerConfig> {
-  const result: Record<string, McpServerConfig> = {}
-
-  // 从 providerOptions.qoder.mcpServers 提取
+  modelId: string,
+  cliPath?: string,
+): {
+  model: string
+  allowDangerouslySkipPermissions: true
+  permissionMode: 'bypassPermissions'
+  cwd: string
+  pathToQoderCLIExecutable?: string
+  mcpServers?: Record<string, QoderMcpServerConfig>
+} {
   const providerOptions = getQoderProviderOptions(options.providerOptions)
-  if (isRecord(providerOptions?.mcpServers)) {
-    for (const [name, cfg] of Object.entries(providerOptions.mcpServers)) {
-      const normalized = normalizeMcpConfig(cfg, name)
-      if (normalized) result[name] = normalized
-    }
+  const mcpServers = {
+    ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),
+    ...extractMcpServersFromTools(options.tools),
   }
 
-  // 从 tools 中的 provider-defined 提取
-  for (const tool of options.tools ?? []) {
-    if (tool.type !== 'provider-defined') continue
-    const name = inferServerName(tool)
-    const cfg = normalizeMcpConfig(tool.args, name)
-    if (name && cfg && !result[name]) result[name] = cfg
+  return {
+    model: modelId,
+    allowDangerouslySkipPermissions: true,
+    permissionMode: 'bypassPermissions',
+    cwd: process.cwd(),
+    ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
   }
-
-  return result
 }
 
 function getQoderProviderOptions(
   providerOptions: LanguageModelV2CallOptions['providerOptions'],
-): { mcpServers?: Record<string, unknown> } | undefined {
+): QoderProviderOptions | undefined {
   if (!isRecord(providerOptions)) return undefined
   const q = providerOptions.qoder
-  return isRecord(q) ? (q as { mcpServers?: Record<string, unknown> }) : undefined
+  return isRecord(q) ? (q as QoderProviderOptions) : undefined
 }
 
-function inferServerName(tool: { id: string; name: string; args: unknown }): string | undefined {
+function extractMcpServersFromProviderOptions(
+  mcpServers: unknown,
+): Record<string, QoderMcpServerConfig> {
+  if (!isRecord(mcpServers)) return {}
+  const normalizedEntries = Object.entries(mcpServers)
+    .map(([name, config]) => [name, normalizeMcpServerConfig(config)] as const)
+    .filter((entry): entry is [string, QoderMcpServerConfig] => entry[1] != null)
+  return Object.fromEntries(normalizedEntries)
+}
+
+function extractMcpServersFromTools(
+  tools: LanguageModelV2CallOptions['tools'],
+): Record<string, QoderMcpServerConfig> {
+  if (!tools || tools.length === 0) return {}
+  const servers: Record<string, QoderMcpServerConfig> = {}
+  for (const tool of tools) {
+    if (tool.type !== 'provider-defined') continue
+    const serverName = inferProviderDefinedToolServerName(tool)
+    const serverConfig = normalizeMcpServerConfig(tool.args)
+    if (!serverName || !serverConfig) continue
+    servers[serverName] = serverConfig
+  }
+  return servers
+}
+
+function inferProviderDefinedToolServerName(tool: LanguageModelV2ProviderDefinedTool): string | undefined {
   const args = isRecord(tool.args) ? tool.args : undefined
   const explicit =
     pickString(args?.serverName) ??
@@ -117,18 +198,13 @@ function inferServerName(tool: { id: string; name: string; args: unknown }): str
   return suffix || tool.name
 }
 
-function normalizeMcpConfig(config: unknown, serverName?: string): McpServerConfig | null {
+function normalizeMcpServerConfig(config: unknown): QoderMcpServerConfig | null {
   if (!isRecord(config)) return null
   if (config.enabled === false) return null
 
   // SDK in-process MCP server（由 createSdkMcpServer() 创建的 { type: 'sdk', name, instance }）
   if (config.type === 'sdk' && typeof config.name === 'string' && config.instance != null) {
     return { type: 'sdk', name: config.name, instance: config.instance }
-  }
-
-  // 原始 McpServer 实例（直接传 createSdkMcpServer() 返回值，有 connect/close 方法）
-  if (typeof config.connect === 'function' && typeof config.close === 'function' && serverName) {
-    return { type: 'sdk', name: serverName, instance: config as { connect(): Promise<void>; close(): Promise<void> } }
   }
 
   if (Array.isArray(config.command) && config.command.every((v) => typeof v === 'string')) {
@@ -142,6 +218,7 @@ function normalizeMcpConfig(config: unknown, serverName?: string): McpServerConf
     const args = pickStringArray(config.args)
     const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
     return {
+      ...(config.type === 'stdio' ? { type: 'stdio' as const } : {}),
       command: config.command,
       ...(args && args.length > 0 ? { args } : {}),
       ...(env ? { env } : {}),
@@ -158,16 +235,10 @@ function normalizeMcpConfig(config: unknown, serverName?: string): McpServerConf
     }
   }
 
-  if (isRecord(config.mcpServer)) return normalizeMcpConfig(config.mcpServer)
-  if (isRecord(config.serverConfig)) return normalizeMcpConfig(config.serverConfig)
+  if (isRecord(config.mcpServer)) return normalizeMcpServerConfig(config.mcpServer)
+  if (isRecord(config.serverConfig)) return normalizeMcpServerConfig(config.serverConfig)
 
   return null
-}
-
-// ── Prompt builder ────────────────────────────────────────────────────────────
-
-function buildPrompt(options: LanguageModelV2CallOptions): string {
-  return buildStringPrompt(options.prompt)
 }
 
 // ── LanguageModelV2 实现 ──────────────────────────────────────────────────────
@@ -214,138 +285,96 @@ export class QoderLanguageModel implements LanguageModelV2 {
   async doStream(options: LanguageModelV2CallOptions): Promise<{
     stream: ReadableStream<LanguageModelV2StreamPart>
   }> {
-    const prompt = buildPrompt(options)
-    const mcpServers = buildMcpServers(options)
+    const prompt = buildPromptFromOptions(options)
     const cliPath = resolveQoderCLI()
+    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath)
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start: async (controller) => {
         // ── text block 状态管理 ──────────────────────────────────────────
-        let textIdCounter = 0
-        let currentTextId: string | null = null
-        let textStarted = false
+        let textBlockCounter = 0
         let hasFinish = false
 
-        // tool_use_id → toolName 映射（用于 tool_result 时查找 toolName）
-        const toolCallNames = new Map<string, string>()
-        // 已通过 stream_event 发出的 tool-call id（防 assistant 重复发）
-        const emittedToolCalls = new Set<string>()
-
         // stream_event 路径：按 index 跟踪活跃内容块
-        const streamBlocks = new Map<number, {
-          type: string
-          id?: string
-          name?: string
-          accumulatedJson?: string
-        }>()
+        const activeStreamTextBlocks = new Set<number>()
+        const streamToolBlocks = new Map<number, { id: string; name: string; input: string }>()
 
-        const ensureTextStart = () => {
-          if (!textStarted) {
-            currentTextId = String(textIdCounter++)
-            controller.enqueue({ type: 'text-start', id: currentTextId })
-            textStarted = true
-          }
-        }
+        // 已通过 stream_event 发出的标志（防 assistant 消息重复发）
+        let sawStreamEventText = false
+        let sawStreamEventTool = false
 
-        const ensureTextEnd = () => {
-          if (textStarted && currentTextId != null) {
-            controller.enqueue({ type: 'text-end', id: currentTextId })
-            textStarted = false
-            currentTextId = null
-          }
-        }
-
-        const enqueueFinish = (
-          finishReason: LanguageModelV2FinishReason,
-          usage?: LanguageModelV2Usage,
-        ) => {
-          if (hasFinish) return
-          ensureTextEnd()
-          controller.enqueue({
-            type: 'finish',
-            finishReason,
-            usage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-          })
-          hasFinish = true
-        }
-
-        const hasMcpServers = Object.keys(mcpServers).length > 0
-
-        const client = new QoderAgentSDKClient({
-          model: this.modelId,
-          cwd: process.cwd(),
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          storageDir: resolveStorageDir(),
-          ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
-          ...(hasMcpServers ? { mcpServers } : {}),
-        })
+        // tool_use_id → {toolName, input} 映射（用于 tool_result 时查找 toolName）
+        const pendingToolCalls = new Map<string, { toolName: string; input: string }>()
 
         try {
-          await client.connect()
-          await client.query(prompt, randomUUID())
-
-          for await (const msg of client.receiveMessages()) {
+          // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
+          const qoderQuery = query({ prompt, options: qoderOptions })
+          for await (const msg of qoderQuery) {
             const m = msg as Record<string, unknown>
 
             // ── stream_event：增量文本 / 增量工具输入（流式 CLI 支持时） ──
             if (m.type === 'stream_event') {
-              const event = m.event as Record<string, unknown> | undefined
-              if (!event) continue
+              const ev = (m as { event: Record<string, unknown> }).event
 
-              if (event.type === 'content_block_start' && isRecord(event.content_block)) {
-                const block = event.content_block
-                const idx = typeof event.index === 'number' ? event.index : 0
+              if (ev.type === 'content_block_start' && isRecord(ev.content_block)) {
+                const block = ev.content_block
+                const idx = typeof ev.index === 'number' ? ev.index : 0
 
                 if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
-                  // 工具调用开始：先关闭当前文本块
-                  ensureTextEnd()
-                  streamBlocks.set(idx, { type: 'tool_use', id: block.id, name: block.name, accumulatedJson: '' })
-                  toolCallNames.set(block.id, block.name)
+                  sawStreamEventTool = true
+                  const toolName = normalizeToolName(block.name)
+                  streamToolBlocks.set(idx, { id: block.id, name: toolName, input: '' })
                   controller.enqueue({
                     type: 'tool-input-start',
                     id: block.id,
-                    toolName: block.name,
+                    toolName,
                     providerExecuted: true,
                   } as LanguageModelV2StreamPart)
                 } else if (block.type === 'text') {
-                  streamBlocks.set(idx, { type: 'text' })
-                  ensureTextStart()
+                  activeStreamTextBlocks.add(idx)
+                  controller.enqueue({ type: 'text-start', id: String(idx) })
                 }
-              } else if (event.type === 'content_block_delta' && isRecord(event.delta)) {
-                const delta = event.delta
-                const idx = typeof event.index === 'number' ? event.index : 0
-                const block = streamBlocks.get(idx)
+              } else if (ev.type === 'content_block_delta' && isRecord(ev.delta)) {
+                const delta = ev.delta
+                const idx = typeof ev.index === 'number' ? ev.index : 0
 
                 if (delta.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
-                  ensureTextStart()
-                  controller.enqueue({ type: 'text-delta', id: currentTextId ?? '0', delta: delta.text })
-                } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string' && block?.type === 'tool_use' && block.id) {
-                  block.accumulatedJson = (block.accumulatedJson ?? '') + delta.partial_json
-                  controller.enqueue({
-                    type: 'tool-input-delta',
-                    id: block.id,
-                    delta: delta.partial_json,
-                  } as LanguageModelV2StreamPart)
+                  sawStreamEventText = true
+                  if (!activeStreamTextBlocks.has(idx)) {
+                    activeStreamTextBlocks.add(idx)
+                    controller.enqueue({ type: 'text-start', id: String(idx) })
+                  }
+                  controller.enqueue({ type: 'text-delta', id: String(idx), delta: delta.text })
+                } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+                  const toolBlock = streamToolBlocks.get(idx)
+                  if (toolBlock) {
+                    toolBlock.input += delta.partial_json
+                    controller.enqueue({
+                      type: 'tool-input-delta',
+                      id: toolBlock.id,
+                      delta: delta.partial_json,
+                    } as LanguageModelV2StreamPart)
+                  }
                 }
-              } else if (event.type === 'content_block_stop') {
-                const idx = typeof event.index === 'number' ? event.index : 0
-                const block = streamBlocks.get(idx)
+              } else if (ev.type === 'content_block_stop') {
+                const idx = typeof ev.index === 'number' ? ev.index : 0
+                const toolBlock = streamToolBlocks.get(idx)
 
-                if (block?.type === 'tool_use' && block.id) {
-                  controller.enqueue({ type: 'tool-input-end', id: block.id } as LanguageModelV2StreamPart)
+                if (toolBlock) {
+                  controller.enqueue({ type: 'tool-input-end', id: toolBlock.id } as LanguageModelV2StreamPart)
                   controller.enqueue({
                     type: 'tool-call',
-                    toolCallId: block.id,
-                    toolName: block.name ?? '',
-                    input: block.accumulatedJson || '{}',
+                    toolCallId: toolBlock.id,
+                    toolName: toolBlock.name,
+                    input: toolBlock.input,
                     providerExecuted: true,
                   } as LanguageModelV2StreamPart)
-                  emittedToolCalls.add(block.id)
-                } else if (block?.type === 'text') {
-                  ensureTextEnd()
+                  pendingToolCalls.set(toolBlock.id, { toolName: toolBlock.name, input: toolBlock.input })
+                  streamToolBlocks.delete(idx)
+                } else if (activeStreamTextBlocks.has(idx)) {
+                  controller.enqueue({ type: 'text-end', id: String(idx) })
+                  activeStreamTextBlocks.delete(idx)
                 }
-                streamBlocks.delete(idx)
               }
 
             // ── assistant：完整消息块（CLI 不支持流式时走此路径） ──────────
@@ -355,28 +384,36 @@ export class QoderLanguageModel implements LanguageModelV2 {
               for (const block of content) {
                 if (!isRecord(block)) continue
 
-                if (block.type === 'text' && typeof block.text === 'string' && block.text) {
-                  ensureTextStart()
-                  controller.enqueue({ type: 'text-delta', id: currentTextId ?? '0', delta: block.text })
-                  // 不立即 ensureTextEnd——同一 assistant 消息中的多个 text 块合为一个
-                } else if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
-                  // 如果 stream_event 路径已经发出过，跳过
-                  if (emittedToolCalls.has(block.id)) continue
-
-                  ensureTextEnd()
-                  toolCallNames.set(block.id, block.name)
+                if (block.type === 'text' && typeof block.text === 'string' && block.text && !sawStreamEventText) {
+                  const textId = String(textBlockCounter++)
+                  controller.enqueue({ type: 'text-start', id: textId })
+                  controller.enqueue({ type: 'text-delta', id: textId, delta: block.text })
+                  controller.enqueue({ type: 'text-end', id: textId })
+                } else if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string' && !sawStreamEventTool) {
+                  const toolName = normalizeToolName(block.name)
+                  const inputJson = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {})
+                  controller.enqueue({
+                    type: 'tool-input-start',
+                    id: block.id,
+                    toolName,
+                    providerExecuted: true,
+                  } as LanguageModelV2StreamPart)
+                  controller.enqueue({
+                    type: 'tool-input-delta',
+                    id: block.id,
+                    delta: inputJson,
+                  } as LanguageModelV2StreamPart)
+                  controller.enqueue({ type: 'tool-input-end', id: block.id } as LanguageModelV2StreamPart)
                   controller.enqueue({
                     type: 'tool-call',
                     toolCallId: block.id,
-                    toolName: block.name,
-                    input: typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {}),
+                    toolName,
+                    input: inputJson,
                     providerExecuted: true,
                   } as LanguageModelV2StreamPart)
-                  emittedToolCalls.add(block.id)
+                  pendingToolCalls.set(block.id, { toolName, input: inputJson })
                 }
               }
-              // assistant 消息处理完后关闭文本块（下一条消息可能是 tool_result）
-              ensureTextEnd()
 
             // ── user：工具执行结果（CLI 内部执行后返回） ─────────────────
             } else if (m.type === 'user') {
@@ -384,64 +421,95 @@ export class QoderLanguageModel implements LanguageModelV2 {
               const content = Array.isArray(rawContent) ? rawContent : []
               for (const block of content) {
                 if (!isRecord(block)) continue
+                if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
 
-                if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-                  const toolUseId = block.tool_use_id
-                  const toolName = toolCallNames.get(toolUseId) ?? ''
-                  controller.enqueue({
-                    type: 'tool-result',
-                    toolCallId: toolUseId,
-                    toolName,
-                    result: block.content ?? '',
-                    isError: block.is_error === true,
-                    providerExecuted: true,
-                  } as LanguageModelV2StreamPart)
-                }
+                const toolCall = pendingToolCalls.get(block.tool_use_id)
+                if (!toolCall) continue
+
+                controller.enqueue({
+                  type: 'tool-result',
+                  toolCallId: block.tool_use_id,
+                  toolName: toolCall.toolName,
+                  result: normalizeToolResultContent(toolCall.toolName, block.content),
+                  providerExecuted: true,
+                } as LanguageModelV2StreamPart)
+                pendingToolCalls.delete(block.tool_use_id)
               }
 
             // ── result：会话结束 ────────────────────────────────────────
             } else if (m.type === 'result') {
+              // 对任何残留未匹配的 tool call，补一个空结果
+              for (const [toolCallId, toolCall] of pendingToolCalls) {
+                controller.enqueue({
+                  type: 'tool-result',
+                  toolCallId,
+                  toolName: toolCall.toolName,
+                  result: normalizeToolResultContent(toolCall.toolName, null),
+                  providerExecuted: true,
+                } as LanguageModelV2StreamPart)
+              }
+              pendingToolCalls.clear()
+
+              // 关闭所有未关闭的文本块
+              for (const idx of activeStreamTextBlocks) {
+                controller.enqueue({ type: 'text-end', id: String(idx) })
+              }
+              activeStreamTextBlocks.clear()
+
               const isError =
                 m.is_error === true ||
                 (typeof m.subtype === 'string' && m.subtype !== 'success')
 
               if (isError) {
-                const errMsg =
-                  typeof m.subtype === 'string' ? m.subtype : 'error_during_execution'
+                const errMsg = typeof m.subtype === 'string' ? m.subtype : 'error_during_execution'
                 const errors = Array.isArray(m.errors) ? JSON.stringify(m.errors) : ''
                 console.error('[QoderSDK] result error:', JSON.stringify(m, null, 2))
                 controller.enqueue({
                   type: 'error',
                   error: new Error(`Qoder SDK: ${errMsg}${errors ? ` | errors: ${errors}` : ''}`),
                 })
-                enqueueFinish('error')
+                controller.enqueue({
+                  type: 'finish',
+                  finishReason: 'error',
+                  usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+                })
               } else {
-                const usage = m.usage as {
-                  input_tokens: number
-                  output_tokens: number
-                } | undefined
-                enqueueFinish('stop', {
-                  inputTokens: usage?.input_tokens ?? 0,
-                  outputTokens: usage?.output_tokens ?? 0,
-                  totalTokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+                const usage = m.usage as { input_tokens: number; output_tokens: number } | undefined
+                controller.enqueue({
+                  type: 'finish',
+                  finishReason: 'stop',
+                  usage: {
+                    inputTokens: usage?.input_tokens ?? 0,
+                    outputTokens: usage?.output_tokens ?? 0,
+                    totalTokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+                  },
                 })
               }
+              hasFinish = true
               break  // result 是终止消息，退出迭代
             }
             // type: 'system' — 忽略
           }
 
-          await (client as { disconnect?: () => Promise<void> }).disconnect?.()
-          if (!hasFinish) enqueueFinish('stop')
+          if (!hasFinish) {
+            controller.enqueue({
+              type: 'finish',
+              finishReason: 'stop',
+              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            })
+          }
           controller.close()
         } catch (err) {
-          await (client as { disconnect?: () => Promise<void> }).disconnect?.()
           if (!hasFinish) {
             controller.enqueue({
               type: 'error',
               error: err instanceof Error ? err : new Error(String(err)),
             })
-            enqueueFinish('error')
+            controller.enqueue({
+              type: 'finish',
+              finishReason: 'error',
+              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            })
           }
           controller.close()
         }

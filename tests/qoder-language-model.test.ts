@@ -9,27 +9,28 @@ import type {
 // 控制每个测试推送的 SDKMessage 事件
 const mockMessages: unknown[] = []
 
-const mockConnect = vi.fn(async () => {})
-const mockQuery = vi.fn(async () => {})
-const mockReceiveMessages = vi.fn(async function* () {
-  for (const msg of mockMessages) {
-    yield msg
-  }
-})
+// 记录最近一次 query() 调用时的参数
+let lastQueryParams: { prompt: unknown; options: unknown } | null = null
 
-// 记录最近一次 QoderAgentSDKClient 构造时的 options
-let lastClientOptions: unknown = null
-function MockQoderAgentSDKClient(options: unknown) {
-  lastClientOptions = options
-  this.connect = mockConnect
-  this.query = mockQuery
-  this.receiveMessages = mockReceiveMessages
-}
+// 控制 query() 是否抛出异常
+let mockQueryError: Error | null = null
+
+const mockQueryFn = vi.fn((params: { prompt: unknown; options: unknown }) => {
+  lastQueryParams = params
+  if (mockQueryError) {
+    throw mockQueryError
+  }
+  return (async function* () {
+    for (const msg of mockMessages) {
+      yield msg
+    }
+  })()
+})
 
 vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
   configure: vi.fn(),
   IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
-  QoderAgentSDKClient: MockQoderAgentSDKClient,
+  query: mockQueryFn,
 }))
 
 // ── Test suite ───────────────────────────────────────────────────────────────
@@ -40,10 +41,15 @@ describe('QoderLanguageModel', () => {
   beforeEach(async () => {
     vi.resetModules()
     mockMessages.length = 0
-    lastClientOptions = null
-    mockConnect.mockClear()
-    mockQuery.mockClear()
-    mockReceiveMessages.mockClear()
+    lastQueryParams = null
+    mockQueryError = null
+    mockQueryFn.mockClear()
+    // 重新注册 mock，使 resetModules 后的新 import 依然生效
+    vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
+      configure: vi.fn(),
+      IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
+      query: mockQueryFn,
+    }))
     const mod = await import('../src/qoder-language-model.js')
     QoderLanguageModel = mod.QoderLanguageModel
   })
@@ -139,8 +145,8 @@ describe('QoderLanguageModel', () => {
       expect(finish?.finishReason).toBe('error')
     })
 
-    it('connect/query 抛出异常 → error + finish reason=error', async () => {
-      mockConnect.mockRejectedValueOnce(new Error('CLI not found'))
+    it('query() 抛出异常 → error + finish reason=error', async () => {
+      mockQueryError = new Error('CLI not found')
 
       const model = new QoderLanguageModel('auto')
       const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
@@ -163,26 +169,25 @@ describe('QoderLanguageModel', () => {
       expect(finish?.finishReason).toBe('stop')
     })
 
-    it('使用正确的 modelId 构造 QoderAgentSDKClient', async () => {
+    it('使用正确的 modelId 传递给 query()', async () => {
       pushSuccessResult()
 
       const model = new QoderLanguageModel('ultimate')
       await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
-      expect(lastClientOptions).toBeDefined()
-      expect(lastClientOptions.model).toBe('ultimate')
+      expect(lastQueryParams).toBeDefined()
+      expect(lastQueryParams.options.model).toBe('ultimate')
     })
 
-    it('prompt 文本内容传递到 client.query', async () => {
+    it('prompt 文本内容传递到 query()', async () => {
       pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
       await collectStream((await model.doStream(buildCallOptions('hello world'))).stream)
 
-      expect(mockQuery).toHaveBeenCalledOnce()
-      const [promptArg] = mockQuery.mock.calls[0]
-      expect(typeof promptArg).toBe('string')
-      expect(promptArg).toContain('hello world')
+      expect(mockQueryFn).toHaveBeenCalledOnce()
+      expect(typeof lastQueryParams.prompt).toBe('string')
+      expect(lastQueryParams.prompt).toContain('hello world')
     })
 
     it('非 text_delta 的 stream_event 被忽略', async () => {
@@ -202,7 +207,7 @@ describe('QoderLanguageModel', () => {
       expect(deltas[0].delta).toBe('real text')
     })
 
-    it('透传 providerOptions.qoder.mcpServers 到 QoderAgentSDKClient', async () => {
+    it('透传 providerOptions.qoder.mcpServers 到 query() options', async () => {
       pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
@@ -226,8 +231,8 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      expect(lastClientOptions?.mcpServers).toBeDefined()
-      const weatherServer = lastClientOptions.mcpServers.weather
+      expect(lastQueryParams?.options?.mcpServers).toBeDefined()
+      const weatherServer = lastQueryParams.options.mcpServers.weather
       expect(weatherServer).toBeDefined()
       expect(weatherServer.command).toBe('npx')
       expect(weatherServer.args).toEqual(['-y', '@acme/weather-mcp'])
@@ -260,7 +265,7 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      const weatherServer = lastClientOptions?.mcpServers?.weather
+      const weatherServer = lastQueryParams?.options?.mcpServers?.weather
       expect(weatherServer).toBeDefined()
       expect(weatherServer.command).toBe('uvx')
       expect(weatherServer.args).toEqual(['weather-mcp'])
@@ -304,10 +309,10 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      expect(lastClientOptions?.mcpServers?.echo).toBeDefined()
-      expect(lastClientOptions.mcpServers.echo.type).toBe('sdk')
-      expect(lastClientOptions.mcpServers.echo.name).toBe('echo')
-      expect(lastClientOptions.mcpServers.echo.instance).toBe(mockInstance)
+      expect(lastQueryParams?.options?.mcpServers?.echo).toBeDefined()
+      expect(lastQueryParams.options.mcpServers.echo.type).toBe('sdk')
+      expect(lastQueryParams.options.mcpServers.echo.name).toBe('echo')
+      expect(lastQueryParams.options.mcpServers.echo.instance).toBe(mockInstance)
     })
 
     it('SDK in-process MCP server via provider-defined tools 透传 type/instance', async () => {
@@ -338,7 +343,7 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      const calcServer = lastClientOptions?.mcpServers?.calc
+      const calcServer = lastQueryParams?.options?.mcpServers?.calc
       expect(calcServer).toBeDefined()
       expect(calcServer.type).toBe('sdk')
       expect(calcServer.instance).toBe(mockInstance)
@@ -368,7 +373,7 @@ describe('QoderLanguageModel', () => {
       )
 
       // enabled=false 应该过滤掉，mcpServers 为空或不含 echo
-      expect(lastClientOptions?.mcpServers?.echo).toBeUndefined()
+      expect(lastQueryParams?.options?.mcpServers?.echo).toBeUndefined()
     })
 
     it('有 mcpServers 时不设置 disallowedTools，允许模型调用工具', async () => {
@@ -394,7 +399,7 @@ describe('QoderLanguageModel', () => {
       )
 
       // 提供了 mcpServers，不应设置 disallowedTools: ['*']
-      expect(lastClientOptions?.disallowedTools).toBeUndefined()
+      expect(lastQueryParams?.options?.disallowedTools).toBeUndefined()
     })
 
     it('无 mcpServers 时也不设置 disallowedTools（允许 CLI 内建工具被调用）', async () => {
@@ -403,7 +408,7 @@ describe('QoderLanguageModel', () => {
       const model = new QoderLanguageModel('auto')
       await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
-      expect(lastClientOptions?.disallowedTools).toBeUndefined()
+      expect(lastQueryParams?.options?.disallowedTools).toBeUndefined()
     })
   })
 })
