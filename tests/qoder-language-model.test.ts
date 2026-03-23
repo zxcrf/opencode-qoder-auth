@@ -278,6 +278,133 @@ describe('QoderLanguageModel', () => {
       expect(textContent?.text).toContain('generated response')
       expect(result.finishReason).toBe('stop')
     })
+
+    // ── SDK in-process MCP server (type: 'sdk') ───────────────────────────────
+
+    it('SDK in-process MCP server via providerOptions 直接透传 type/name/instance', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+      const sdkServer = { type: 'sdk' as const, name: 'echo', instance: mockInstance }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    echo: sdkServer,
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastClientOptions?.mcpServers?.echo).toBeDefined()
+      expect(lastClientOptions.mcpServers.echo.type).toBe('sdk')
+      expect(lastClientOptions.mcpServers.echo.name).toBe('echo')
+      expect(lastClientOptions.mcpServers.echo.instance).toBe(mockInstance)
+    })
+
+    it('SDK in-process MCP server via provider-defined tools 透传 type/instance', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                {
+                  type: 'provider-defined',
+                  id: 'qoder.calc',
+                  name: 'calculator',
+                  args: {
+                    serverName: 'calc',
+                    type: 'sdk',
+                    name: 'calc',
+                    instance: mockInstance,
+                  },
+                },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const calcServer = lastClientOptions?.mcpServers?.calc
+      expect(calcServer).toBeDefined()
+      expect(calcServer.type).toBe('sdk')
+      expect(calcServer.instance).toBe(mockInstance)
+    })
+
+    it('SDK server enabled=false 时被过滤', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+      const sdkServer = { type: 'sdk' as const, name: 'echo', instance: mockInstance, enabled: false }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    echo: sdkServer,
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // enabled=false 应该过滤掉，mcpServers 为空或不含 echo
+      expect(lastClientOptions?.mcpServers?.echo).toBeUndefined()
+    })
+
+    it('有 mcpServers 时不设置 disallowedTools，允许模型调用工具', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    myserver: { type: 'sdk', name: 'myserver', instance: mockInstance },
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // 提供了 mcpServers，不应设置 disallowedTools: ['*']
+      expect(lastClientOptions?.disallowedTools).toBeUndefined()
+    })
+
+    it('无 mcpServers 时也不设置 disallowedTools（允许 CLI 内建工具被调用）', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastClientOptions?.disallowedTools).toBeUndefined()
+    })
   })
 })
 
