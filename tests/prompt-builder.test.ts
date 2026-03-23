@@ -236,7 +236,7 @@ describe('buildPromptFromOptions', () => {
     expect(typeof result).toBe('string')
   })
 
-  it('多模态模式：非 user 历史以 <conversation_history> 注入下一条 user 消息', async () => {
+  it('多模态模式：只产出最后一条 user 消息，完整历史注入为 <conversation_history> 前缀', async () => {
     const prompt = buildPromptFromOptions({
       ...BASE_OPTIONS,
       prompt: [
@@ -264,18 +264,42 @@ describe('buildPromptFromOptions', () => {
       messages.push(message)
     }
 
-    // 第一条 user 消息：前面有 system，所以注入了 <conversation_history>
-    const firstContent = messages[0].message.content
-    expect(firstContent[0].text).toContain('<conversation_history>')
-    expect(firstContent[0].text).toContain('<system>')
-    expect(firstContent[0].text).toContain('You are helpful.')
-    expect(firstContent[1].text).toContain('first question')
+    // 修复后：只产出 1 条 SDKUserMessage（最后一条 user 消息），而非多条
+    expect(messages).toHaveLength(1)
 
-    // 第二条 user 消息前注入了 <conversation_history>（含 assistant 回复）
-    const secondContent = messages[1].message.content
-    expect(secondContent[0].text).toContain('<conversation_history>')
-    expect(secondContent[0].text).toContain('first answer')
-    expect(secondContent[1].type).toBe('image')
-    expect(secondContent[2].text).toBe('second question')
+    const content = (messages[0] as any).message.content
+    // 第一块：包含全量历史（system + first question + first answer）的 <conversation_history>
+    expect(content[0].type).toBe('text')
+    expect(content[0].text).toContain('<conversation_history>')
+    expect(content[0].text).toContain('<system>')
+    expect(content[0].text).toContain('You are helpful.')
+    expect(content[0].text).toContain('first question')
+    expect(content[0].text).toContain('first answer')
+    // 第二块：图片
+    expect(content[1].type).toBe('image')
+    // 第三块：当前问题文本
+    expect(content[2].text).toBe('second question')
+  })
+
+  it('buildStringPrompt 多轮对话：历史包在 <conversation_history>，末条 user 消息作为主任务', () => {
+    const prompt = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        { role: 'user', content: [{ type: 'text', text: 'first question' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+        { role: 'user', content: [{ type: 'text', text: 'second question' }] },
+      ],
+    }) as string
+
+    // 历史应包在 <conversation_history> 标签中
+    expect(prompt).toContain('<conversation_history>')
+    expect(prompt).toContain('first question')
+    expect(prompt).toContain('<assistant>')
+    expect(prompt).toContain('first answer')
+    expect(prompt).toContain('</conversation_history>')
+    // 末条 user 消息在历史块之外（不重复嵌套）
+    const historyEnd = prompt.indexOf('</conversation_history>')
+    const secondQuestionPos = prompt.lastIndexOf('second question')
+    expect(secondQuestionPos).toBeGreaterThan(historyEnd)
   })
 })

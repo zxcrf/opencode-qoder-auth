@@ -121,125 +121,139 @@ function serializeMessage(message: LanguageModelV2Message): string {
 
 /** 纯文本模式：将完整对话历史序列化为结构化字符串 */
 export function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
-  const parts: string[] = []
-
-  for (const message of prompt) {
-    const serialized = serializeMessage(message)
-    if (serialized) {
-      parts.push(serialized)
-    }
+  // 找到最后一条 user 消息的位置
+  let lastUserIdx = -1
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    if (prompt[i].role === 'user') { lastUserIdx = i; break }
   }
 
-  return parts.join('\n\n') || 'Hello'
+  if (lastUserIdx === -1) return 'Hello'
+
+  // 将最后一条 user 消息之前的历史序列化
+  const historyParts: string[] = []
+  for (let i = 0; i < lastUserIdx; i++) {
+    const s = serializeMessage(prompt[i])
+    if (s) historyParts.push(s)
+  }
+
+  // 当前任务：最后一条 user 消息
+  const currentMsg = serializeMessage(prompt[lastUserIdx])
+
+  if (historyParts.length > 0) {
+    return `<conversation_history>\n${historyParts.join('\n\n')}\n</conversation_history>\n\n${currentMsg}`
+  }
+  return currentMsg || 'Hello'
 }
 
 /** 多模态模式：将完整消息历史转为 AsyncIterable<SDKUserMessage>（含图片） */
 async function* buildAsyncIterablePrompt(
   prompt: LanguageModelV2Prompt,
 ): AsyncIterable<SDKUserMessage> {
-  // 将非 user 消息以文本方式合并到下一条 user 消息之前，
-  // 或在最后一条 user 消息中以 context 前缀附加。
-  // SDK 的 stream-json 模式只接受 user 类型消息，
-  // 所以先把历史上下文压入第一条 user 消息的文本前缀。
-  const contextParts: string[] = []
+  // 只产出最后一条 user 消息，避免 SDK 因多条用户消息而在第一条 result 后终止。
+  // 历史（最后一条 user 消息之前的所有消息）序列化后作为 <conversation_history> 前缀注入。
+  let lastUserIdx = -1
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    if (prompt[i].role === 'user') { lastUserIdx = i; break }
+  }
+  if (lastUserIdx === -1) return
 
-  for (const message of prompt) {
-    if (message.role === 'user' && Array.isArray(message.content)) {
-      const contentBlocks: Array<
-        | { type: 'text'; text: string }
-        | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-      > = []
+  // 构建历史前缀
+  const historyParts: string[] = []
+  for (let i = 0; i < lastUserIdx; i++) {
+    const s = serializeMessage(prompt[i])
+    if (s) historyParts.push(s)
+  }
 
-      // 如果有历史上下文，先作为文本前缀注入
-      if (contextParts.length > 0) {
-        contentBlocks.push({
-          type: 'text',
-          text: `<conversation_history>\n${contextParts.join('\n\n')}\n</conversation_history>`,
-        })
-        contextParts.length = 0
-      }
+  const contentBlocks: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  > = []
 
-      for (const part of message.content) {
-        if (part.type === 'text') {
-          contentBlocks.push({ type: 'text', text: part.text })
-        } else if (part.type === 'image') {
-          const { image } = part
-          // AI SDK v2 image 可能是 URL、Uint8Array 或 base64 字符串
-          if (typeof image === 'string') {
-            // base64 data URL: "data:image/png;base64,..."
-            const match = image.match(/^data:([^;]+);base64,(.+)$/)
-            if (match) {
-              contentBlocks.push({
-                type: 'image',
-                source: { type: 'base64', media_type: match[1], data: match[2] },
-              })
-            } else {
-              // 裸 base64 字符串，假设 JPEG
-              contentBlocks.push({
-                type: 'image',
-                source: { type: 'base64', media_type: 'image/jpeg', data: image },
-              })
-            }
-          } else if (image instanceof Uint8Array) {
-            // 二进制数据，转 base64
-            const base64 = Buffer.from(image).toString('base64')
-            const mediaType = part.mimeType ?? 'image/jpeg'
+  // 注入历史前缀
+  if (historyParts.length > 0) {
+    contentBlocks.push({
+      type: 'text',
+      text: `<conversation_history>\n${historyParts.join('\n\n')}\n</conversation_history>`,
+    })
+  }
+
+  // 处理最后一条 user 消息的内容块
+  const lastMsg = prompt[lastUserIdx]
+  if (lastMsg.role === 'user' && Array.isArray(lastMsg.content)) {
+    for (const part of lastMsg.content) {
+      if (part.type === 'text') {
+        contentBlocks.push({ type: 'text', text: part.text })
+      } else if (part.type === 'image') {
+        const { image } = part
+        // AI SDK v2 image 可能是 URL、Uint8Array 或 base64 字符串
+        if (typeof image === 'string') {
+          // base64 data URL: "data:image/png;base64,..."
+          const match = image.match(/^data:([^;]+);base64,(.+)$/)
+          if (match) {
             contentBlocks.push({
               type: 'image',
-              source: { type: 'base64', media_type: mediaType, data: base64 },
+              source: { type: 'base64', media_type: match[1], data: match[2] },
+            })
+          } else {
+            // 裸 base64 字符串，假设 JPEG
+            contentBlocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: image },
             })
           }
-        } else if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) {
-          // clipboard / --file 图片，AI SDK v2 以 type='file' 传入
-          const { data, mediaType } = part
-          let base64Data: string
-          let resolvedMediaType = mediaType
-          if (data instanceof Uint8Array) {
-            base64Data = Buffer.from(data).toString('base64')
-          } else if (typeof data === 'string') {
-            const match = data.match(/^data:([^;]+);base64,(.+)$/)
-            if (match) {
-              resolvedMediaType = match[1]
-              base64Data = match[2]
-            } else {
-              // 裸 base64 字符串
-              base64Data = data
-            }
-          } else {
-            // URL 对象
-            const urlStr = (data as URL).toString()
-            const match = urlStr.match(/^data:([^;]+);base64,(.+)$/)
-            if (match) {
-              resolvedMediaType = match[1]
-              base64Data = match[2]
-            } else {
-              continue // HTTP URL 暂不支持
-            }
-          }
+        } else if (image instanceof Uint8Array) {
+          // 二进制数据，转 base64
+          const base64 = Buffer.from(image).toString('base64')
+          const mediaType = part.mimeType ?? 'image/jpeg'
           contentBlocks.push({
             type: 'image',
-            source: { type: 'base64', media_type: resolvedMediaType, data: base64Data },
+            source: { type: 'base64', media_type: mediaType, data: base64 },
           })
         }
-      }
-
-      if (contentBlocks.length > 0) {
-        yield {
-          type: 'user',
-          session_id: '',
-          parent_tool_use_id: null,
-          message: {
-            role: 'user',
-            content: contentBlocks,
-          },
-        } as SDKUserMessage
-      }
-    } else {
-      // 非 user 消息：序列化后存入上下文缓冲，待下条 user 消息时注入
-      const serialized = serializeMessage(message)
-      if (serialized) {
-        contextParts.push(serialized)
+      } else if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) {
+        // clipboard / --file 图片，AI SDK v2 以 type='file' 传入
+        const { data, mediaType } = part
+        let base64Data: string
+        let resolvedMediaType = mediaType
+        if (data instanceof Uint8Array) {
+          base64Data = Buffer.from(data).toString('base64')
+        } else if (typeof data === 'string') {
+          const match = data.match(/^data:([^;]+);base64,(.+)$/)
+          if (match) {
+            resolvedMediaType = match[1]
+            base64Data = match[2]
+          } else {
+            // 裸 base64 字符串
+            base64Data = data
+          }
+        } else {
+          // URL 对象
+          const urlStr = (data as URL).toString()
+          const match = urlStr.match(/^data:([^;]+);base64,(.+)$/)
+          if (match) {
+            resolvedMediaType = match[1]
+            base64Data = match[2]
+          } else {
+            continue // HTTP URL 暂不支持
+          }
+        }
+        contentBlocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: resolvedMediaType, data: base64Data },
+        })
       }
     }
+  }
+
+  if (contentBlocks.length > 0) {
+    yield {
+      type: 'user',
+      session_id: '',
+      parent_tool_use_id: null,
+      message: {
+        role: 'user',
+        content: contentBlocks,
+      },
+    } as SDKUserMessage
   }
 }
