@@ -142,6 +142,7 @@ function buildQoderQueryOptions(
   model: string
   allowDangerouslySkipPermissions: true
   permissionMode: 'bypassPermissions'
+  includePartialMessages: true
   cwd: string
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
@@ -161,6 +162,7 @@ function buildQoderQueryOptions(
     model: modelId,
     allowDangerouslySkipPermissions: true,
     permissionMode: 'bypassPermissions',
+    includePartialMessages: true,
     cwd: process.cwd(),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
@@ -268,6 +270,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
     const { stream } = await this.doStream(options)
     const reader = stream.getReader()
     let text = ''
+    let reasoning = ''
     let finishReason: LanguageModelV2FinishReason = 'stop'
     let usage: LanguageModelV2Usage | undefined
 
@@ -278,6 +281,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
         case 'text-delta':
           text += value.delta
           break
+        case 'reasoning-delta':
+          reasoning += value.delta
+          break
         case 'finish':
           finishReason = value.finishReason
           usage = value.usage
@@ -287,7 +293,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
       }
     }
 
-    const content: LanguageModelV2Content[] = text ? [{ type: 'text', text }] : []
+    const content: LanguageModelV2Content[] = []
+    if (reasoning) content.push({ type: 'reasoning', text: reasoning })
+    if (text) content.push({ type: 'text', text })
     return {
       content,
       finishReason,
@@ -323,11 +331,13 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
         // stream_event 路径：按 index 跟踪活跃内容块
         const activeStreamTextBlocks = new Set<number>()
+        const activeStreamReasoningBlocks = new Set<number>()
         const streamToolBlocks = new Map<number, { id: string; name: string; input: string; isProviderExecuted: boolean }>()
 
         // 已通过 stream_event 发出的标志（防 assistant 消息重复发）
         let sawStreamEventText = false
         let sawStreamEventTool = false
+        let sawStreamEventReasoning = false
 
         // tool_use_id → {toolName, input, isProviderExecuted} 映射（用于 tool_result 时查找）
         const pendingToolCalls = new Map<string, { toolName: string; input: string; isProviderExecuted: boolean }>()
@@ -362,6 +372,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
                       toolName,
                     } as LanguageModelV2StreamPart)
                   }
+                } else if (block.type === 'thinking') {
+                  activeStreamReasoningBlocks.add(idx)
+                  controller.enqueue({ type: 'reasoning-start', id: String(idx) })
                 } else if (block.type === 'text') {
                   activeStreamTextBlocks.add(idx)
                   controller.enqueue({ type: 'text-start', id: String(idx) })
@@ -370,7 +383,14 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 const delta = ev.delta
                 const idx = typeof ev.index === 'number' ? ev.index : 0
 
-                if (delta.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
+                if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
+                  sawStreamEventReasoning = true
+                  if (!activeStreamReasoningBlocks.has(idx)) {
+                    activeStreamReasoningBlocks.add(idx)
+                    controller.enqueue({ type: 'reasoning-start', id: String(idx) })
+                  }
+                  controller.enqueue({ type: 'reasoning-delta', id: String(idx), delta: delta.thinking })
+                } else if (delta.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
                   sawStreamEventText = true
                   if (!activeStreamTextBlocks.has(idx)) {
                     activeStreamTextBlocks.add(idx)
@@ -411,6 +431,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
                     isProviderExecuted: toolBlock.isProviderExecuted,
                   })
                   streamToolBlocks.delete(idx)
+                } else if (activeStreamReasoningBlocks.has(idx)) {
+                  controller.enqueue({ type: 'reasoning-end', id: String(idx) })
+                  activeStreamReasoningBlocks.delete(idx)
                 } else if (activeStreamTextBlocks.has(idx)) {
                   controller.enqueue({ type: 'text-end', id: String(idx) })
                   activeStreamTextBlocks.delete(idx)
@@ -424,7 +447,12 @@ export class QoderLanguageModel implements LanguageModelV2 {
               for (const block of content) {
                 if (!isRecord(block)) continue
 
-                if (block.type === 'text' && typeof block.text === 'string' && block.text && !sawStreamEventText) {
+                if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking && !sawStreamEventReasoning) {
+                  const reasoningId = String(textBlockCounter++)
+                  controller.enqueue({ type: 'reasoning-start', id: reasoningId })
+                  controller.enqueue({ type: 'reasoning-delta', id: reasoningId, delta: block.thinking })
+                  controller.enqueue({ type: 'reasoning-end', id: reasoningId })
+                } else if (block.type === 'text' && typeof block.text === 'string' && block.text && !sawStreamEventText) {
                   const textId = String(textBlockCounter++)
                   controller.enqueue({ type: 'text-start', id: textId })
                   controller.enqueue({ type: 'text-delta', id: textId, delta: block.text })
@@ -481,7 +509,12 @@ export class QoderLanguageModel implements LanguageModelV2 {
               // 清理残留 pending 工具调用
               pendingToolCalls.clear()
 
-              // 关闭所有未关闭的文本块
+              // 关闭所有未关闭的文本块和推理块
+              for (const idx of activeStreamReasoningBlocks) {
+                controller.enqueue({ type: 'reasoning-end', id: String(idx) })
+              }
+              activeStreamReasoningBlocks.clear()
+
               for (const idx of activeStreamTextBlocks) {
                 controller.enqueue({ type: 'text-end', id: String(idx) })
               }

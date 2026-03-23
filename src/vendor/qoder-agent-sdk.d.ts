@@ -1219,6 +1219,8 @@ interface Options {
     hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
     /** Include partial message events */
     includePartialMessages?: boolean;
+    /** Maximum buffer size in bytes for JSON message parsing (default: 1MB) */
+    maxBufferSize?: number;
     /** Maximum budget in USD for the query */
     maxBudgetUsd?: number;
     /** Maximum tokens for thinking process */

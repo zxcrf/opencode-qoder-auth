@@ -8,14 +8,14 @@ import { createHash } from 'crypto';
 
 // package.json
 var package_default = {
-  version: "0.0.44",
+  version: "0.0.45",
   qoderCliVersion: "0.1.34",
   qoderCliCommitHash: "d4d23c5e59520efb89c966c08504f4ed521a4272"};
 
 // src/version.ts
 var VERSION = package_default.version;
 var CLI_VERSION = package_default.qoderCliVersion;
-var SDK_COMMIT_HASH = "afabaa8a3f3bdafe72c3a81cd3d449e0e20d2fdb" ;
+var SDK_COMMIT_HASH = "58757a7d90b63950882e941f5a0dacfff5db4e3f" ;
 var CLI_COMMIT_HASH = package_default.qoderCliCommitHash;
 
 // src/config.ts
@@ -377,6 +377,69 @@ var ControlRequestTimeoutError = class extends QoderAgentSDKError {
   }
 };
 
+function buildPreparedPromptFromMessages(messages, createTempFile) {
+  const promptParts = [];
+  const attachments = [];
+  if (!Array.isArray(messages)) {
+    return {
+      promptText: "Please analyze the attached file(s).",
+      attachments
+    };
+  }
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object" || msg.type !== "user") {
+      continue;
+    }
+    const content = msg.message?.content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    const textParts = [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+        textParts.push(block.text);
+      } else if (block.type === "image") {
+        const source = block.source;
+        if (source?.type === "base64" && typeof source.data === "string" && source.data.length > 0) {
+          attachments.push(createTempFile(source.data, source.media_type));
+        }
+      }
+    }
+    if (textParts.length > 0) {
+      promptParts.push(textParts.join("\n"));
+    }
+  }
+  return {
+    promptText: promptParts.join("\n\n").trim() || "Please analyze the attached file(s).",
+    attachments
+  };
+}
+function mediaTypeToExtension(mediaType) {
+  switch ((mediaType || "").toLowerCase()) {
+    case "image/png":
+      return ".png";
+    case "image/jpeg":
+    case "image/jpg":
+      return ".jpg";
+    case "image/webp":
+      return ".webp";
+    case "image/gif":
+      return ".gif";
+    case "application/pdf":
+      return ".pdf";
+    default:
+      return "";
+  }
+}
+async function* replayMessages(messages) {
+  for (const message of messages) {
+    yield message;
+  }
+}
+
 // src/internal/subprocess-transport.ts
 var DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024;
 process.platform === "win32" ? 8e3 : 1e5;
@@ -395,6 +458,9 @@ var SubprocessTransport = class {
   writeLock = false;
   _disconnectPromise;
   _disconnectReject;
+  preparedPromptText = null;
+  preparedAttachments = [];
+  usePreparedNonStreaming = false;
   constructor({ prompt, options }) {
     this.prompt = prompt;
     this.isStreaming = typeof prompt !== "string";
@@ -406,7 +472,7 @@ var SubprocessTransport = class {
       this.cliPath = this.findCli();
     }
     this.cwd = options.cwd;
-    this.maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
+    this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
     this.resetDisconnectPromise();
   }
   resetDisconnectPromise() {
@@ -618,7 +684,12 @@ Or provide the path via options:
     if (this.options.outputFormat && this.options.outputFormat.type === "json_schema") {
       cmd.push("--json-schema", JSON.stringify(this.options.outputFormat.schema));
     }
-    if (this.isStreaming) {
+    if (this.usePreparedNonStreaming) {
+      for (const attachment of this.preparedAttachments) {
+        cmd.push("--attachment", attachment);
+      }
+      cmd.push("--print", this.preparedPromptText ?? "Please analyze the attached file(s).");
+    } else if (this.isStreaming) {
       cmd.push("--input-format", "stream-json");
     } else {
       cmd.push("--print", String(this.prompt));
@@ -734,7 +805,7 @@ ${stderrBuffer.join("\n")}`, "SubprocessTransport");
         const exitErr = this.exitError || new CLIConnectionError(`CLI process exited (code: ${code}, signal: ${signal})`);
         this._disconnectReject(exitErr);
       });
-      if (!this.isStreaming && this.process.stdin) {
+      if ((!this.isStreaming || this.usePreparedNonStreaming) && this.process.stdin) {
         this.process.stdin.end();
       }
       this.ready = true;
@@ -875,7 +946,31 @@ ${stderrBuffer.join("\n")}`, "SubprocessTransport");
   getDisconnectPromise() {
     return this._disconnectPromise;
   }
-  async queryPrepare(_messages) {
+  shouldUsePreparedNonStreamingMode() {
+    return this.usePreparedNonStreaming;
+  }
+  createTempAttachmentFile(base64Data, mediaType) {
+    const extension = mediaTypeToExtension(mediaType);
+    const hash = createHash("sha256").update(base64Data).digest("hex").slice(0, 12);
+    const filePath = path.join(
+      os.tmpdir(),
+      `qoder-sdk-attachment-${process.pid}-${Date.now()}-${hash}${extension}`
+    );
+    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+    this.tempFiles.push(filePath);
+    return filePath;
+  }
+  async queryPrepare(messages) {
+    const prepared = buildPreparedPromptFromMessages(
+      messages,
+      (base64Data, mediaType) => this.createTempAttachmentFile(base64Data, mediaType)
+    );
+    if (prepared.attachments.length === 0) {
+      return;
+    }
+    this.preparedPromptText = prepared.promptText;
+    this.preparedAttachments = prepared.attachments;
+    this.usePreparedNonStreaming = true;
   }
 };
 
@@ -1646,35 +1741,66 @@ function query(params) {
     }
     configuredOptions = { ...configuredOptions, permissionPromptToolName: "stdio" };
   }
-  const transport = customTransport ?? new SubprocessTransport({
-    prompt: finalPrompt,
-    options: configuredOptions
-  });
-  const sdkMcpServers = {};
-  if (configuredOptions.mcpServers) {
-    for (const [name, config] of Object.entries(configuredOptions.mcpServers)) {
-      if ("type" in config && config.type === "sdk" && "instance" in config) {
-        sdkMcpServers[name] = config.instance;
+  let transport = null;
+  let queryHandler = null;
+  let runtime = null;
+  async function prepareRuntime() {
+    if (runtime) {
+      return runtime;
+    }
+    let preparedPrompt = finalPrompt;
+    let effectiveStreamingMode = isStreamingMode;
+    let preparedMessages = null;
+    if (isStreamingMode) {
+      preparedMessages = [];
+      for await (const message of finalPrompt) {
+        preparedMessages.push(message);
       }
     }
+    preparedPrompt = preparedMessages ? replayMessages(preparedMessages) : finalPrompt;
+    transport = customTransport ?? new SubprocessTransport({
+      prompt: preparedPrompt,
+      options: configuredOptions
+    });
+    if (preparedMessages) {
+      await transport.queryPrepare(preparedMessages);
+      preparedPrompt = replayMessages(preparedMessages);
+      if (typeof transport.shouldUsePreparedNonStreamingMode === "function" && transport.shouldUsePreparedNonStreamingMode()) {
+        effectiveStreamingMode = false;
+      }
+    }
+    const sdkMcpServers = {};
+    if (configuredOptions.mcpServers) {
+      for (const [name, config] of Object.entries(configuredOptions.mcpServers)) {
+        if ("type" in config && config.type === "sdk" && "instance" in config) {
+          sdkMcpServers[name] = config.instance;
+        }
+      }
+    }
+    queryHandler = new QueryHandler({
+      transport,
+      isStreamingMode: effectiveStreamingMode,
+      canUseTool: configuredOptions.canUseTool,
+      hooks: configuredOptions.hooks,
+      sdkMcpServers
+    });
+    runtime = {
+      prompt: preparedPrompt,
+      isStreamingMode: effectiveStreamingMode
+    };
+    return runtime;
   }
-  const queryHandler = new QueryHandler({
-    transport,
-    isStreamingMode,
-    canUseTool: configuredOptions.canUseTool,
-    hooks: configuredOptions.hooks,
-    sdkMcpServers
-  });
   let started = false;
   async function* createGenerator() {
     try {
+      const preparedRuntime = await prepareRuntime();
       await transport.connect();
       await queryHandler.start();
-      if (isStreamingMode) {
+      if (preparedRuntime.isStreamingMode) {
         await queryHandler.initialize();
       }
-      if (isStreamingMode) {
-        queryHandler.streamInput(finalPrompt).catch(() => {
+      if (preparedRuntime.isStreamingMode) {
+        queryHandler.streamInput(preparedRuntime.prompt).catch(() => {
         });
       }
       started = true;
@@ -1702,7 +1828,8 @@ function query(params) {
     },
     // Query-specific methods
     async interrupt() {
-      if (!isStreamingMode) {
+      const preparedRuntime = await prepareRuntime();
+      if (!preparedRuntime.isStreamingMode) {
         throw new Error("interrupt() is only available in streaming mode");
       }
       await queryHandler.interrupt();
@@ -1716,24 +1843,30 @@ function query(params) {
       await queryHandler.rewindFiles(userMessageUuid);
     },
     async setPermissionMode(mode) {
-      if (!isStreamingMode) {
+      const preparedRuntime = await prepareRuntime();
+      if (!preparedRuntime.isStreamingMode) {
         throw new Error("setPermissionMode() is only available in streaming mode");
       }
       await queryHandler.setPermissionMode(mode);
     },
     async setModel(model) {
-      if (!isStreamingMode) {
+      const preparedRuntime = await prepareRuntime();
+      if (!preparedRuntime.isStreamingMode) {
         throw new Error("setModel() is only available in streaming mode");
       }
       await queryHandler.setModel(model);
     },
     async setMaxThinkingTokens(maxThinkingTokens) {
-      if (!isStreamingMode) {
+      const preparedRuntime = await prepareRuntime();
+      if (!preparedRuntime.isStreamingMode) {
         throw new Error("setMaxThinkingTokens() is only available in streaming mode");
       }
       await queryHandler.setMaxThinkingTokens(maxThinkingTokens);
     },
     async supportedCommands() {
+      if (!queryHandler) {
+        return [];
+      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.commands) {
         return initResult.commands;
@@ -1741,6 +1874,9 @@ function query(params) {
       return [];
     },
     async supportedModels() {
+      if (!queryHandler) {
+        return [];
+      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.models) {
         return initResult.models;
@@ -1748,6 +1884,9 @@ function query(params) {
       return [];
     },
     async mcpServerStatus() {
+      if (!queryHandler) {
+        return [];
+      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.mcp_servers) {
         return initResult.mcp_servers;
@@ -1755,6 +1894,9 @@ function query(params) {
       return [];
     },
     async accountInfo() {
+      if (!queryHandler) {
+        return {};
+      }
       const initResult = queryHandler.getInitializationResult();
       if (initResult?.account) {
         return initResult.account;
@@ -1908,7 +2050,7 @@ var TcpTransport = class {
     this.prompt = prompt || "";
     this.isStreaming = typeof prompt !== "string";
     this.options = options || {};
-    this.maxBufferSize = DEFAULT_MAX_BUFFER_SIZE2;
+    this.maxBufferSize = this.options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE2;
     this.chatEndpoint = chatEndpoint || DEFAULT_CHAT_ENDPOINT;
     this.resetDisconnectPromise();
   }
@@ -2973,4 +3115,3 @@ var AbortError = class extends Error {
 };
 
 export { AbortError, CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, ControlRequestTimeoutError, IntegrationMode, LogLevel, MessageParseError, ProcessError, QoderAgentSDKClient, QoderAgentSDKError, SubprocessTransport, TcpTransport, TelemetryTracker, VERSION, configure, configureLogger, createSdkMcpServer, isConnectable, logger, query, submitFeedback, tool };
-
