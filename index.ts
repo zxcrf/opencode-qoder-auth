@@ -1,5 +1,6 @@
 import type { Plugin, Hooks } from '@opencode-ai/plugin'
 import { QODER_MODELS } from './src/models.js'
+import { setMcpBridgeServers } from './src/mcp-bridge.js'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -33,6 +34,11 @@ export const QoderProviderPlugin: Plugin = async () => {
 
       // 用户在 opencode.json 里覆写的 models 优先级更高
       const mergedModels = { ...builtinModels, ...(existing.models ?? {}) }
+
+      // 将 opencode config.mcp 服务器配置桥接到 Qoder SDK query() mcpServers
+      // normalizeMcpServerConfig 的格式转换已内联在 mcp-bridge 中，这里直接转换
+      const bridgedMcp = convertOpencodeMcp(config.mcp)
+      setMcpBridgeServers(bridgedMcp)
 
       config.provider.qoder = {
         ...existing,
@@ -87,3 +93,71 @@ export const QoderProviderPlugin: Plugin = async () => {
 }
 
 export default QoderProviderPlugin
+
+// ── opencode config.mcp → Qoder SDK mcpServers 格式转换 ──────────────────────
+
+type QoderMcpServerConfig =
+  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
+
+function convertOpencodeMcp(
+  mcp: Record<string, unknown> | undefined,
+): Record<string, QoderMcpServerConfig> {
+  if (!mcp || typeof mcp !== 'object') return {}
+  const result: Record<string, QoderMcpServerConfig> = {}
+  for (const [name, raw] of Object.entries(mcp)) {
+    const cfg = convertOneMcpEntry(raw)
+    if (cfg) result[name] = cfg
+  }
+  return result
+}
+
+function convertOneMcpEntry(raw: unknown): QoderMcpServerConfig | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const cfg = raw as Record<string, unknown>
+  if (cfg.enabled === false) return null
+
+  // stdio / local：command 是数组或字符串
+  if (Array.isArray(cfg.command) && cfg.command.every((v) => typeof v === 'string')) {
+    if (cfg.command.length === 0) return null
+    const [command, ...args] = cfg.command as string[]
+    const env = pickStringRecord(cfg.environment) ?? pickStringRecord(cfg.env)
+    return { command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
+  }
+  if (typeof cfg.command === 'string') {
+    const args = pickStringArray(cfg.args)
+    const env = pickStringRecord(cfg.environment) ?? pickStringRecord(cfg.env)
+    return {
+      command: cfg.command,
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+    }
+  }
+
+  // remote / http
+  const url = typeof cfg.url === 'string' ? cfg.url : undefined
+  if (url) {
+    const headers = pickStringRecord(cfg.headers)
+    return {
+      type: cfg.type === 'sse' ? 'sse' : 'http',
+      url,
+      ...(headers ? { headers } : {}),
+    }
+  }
+
+  return null
+}
+
+function pickStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined
+}
+
+function pickStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const entries = Object.entries(value as object).filter(
+    (e): e is [string, string] => typeof e[1] === 'string',
+  )
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}

@@ -44,12 +44,9 @@ describe('QoderLanguageModel', () => {
     lastQueryParams = null
     mockQueryError = null
     mockQueryFn.mockClear()
-    // 重新注册 mock，使 resetModules 后的新 import 依然生效
-    vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
-      configure: vi.fn(),
-      IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
-      query: mockQueryFn,
-    }))
+    // 重置 mcp-bridge 全局状态，避免测试间污染
+    const bridge = await import('../src/mcp-bridge.js')
+    bridge.setMcpBridgeServers({})
     const mod = await import('../src/qoder-language-model.js')
     QoderLanguageModel = mod.QoderLanguageModel
   })
@@ -409,6 +406,457 @@ describe('QoderLanguageModel', () => {
       await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
       expect(lastQueryParams?.options?.disallowedTools).toBeUndefined()
+    })
+
+    // ── mcp-bridge：opencode config.mcp → query() mcpServers ─────────────────
+
+    it('mcp-bridge 中设置的服务器自动注入到 query() mcpServers', async () => {
+      pushSuccessResult()
+
+      // 模拟 config hook 设置了 context7
+      const bridge = await import('../src/mcp-bridge.js')
+      bridge.setMcpBridgeServers({
+        context7: {
+          command: 'npx',
+          args: ['-y', '@upstash/context7-mcp@latest'],
+        },
+      })
+
+      const mod = await import('../src/qoder-language-model.js')
+      const model = new mod.QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastQueryParams?.options?.mcpServers?.context7).toBeDefined()
+      expect(lastQueryParams.options.mcpServers.context7.command).toBe('npx')
+      expect(lastQueryParams.options.mcpServers.context7.args).toEqual(['-y', '@upstash/context7-mcp@latest'])
+    })
+
+    it('providerOptions.qoder.mcpServers 优先级高于 mcp-bridge', async () => {
+      pushSuccessResult()
+
+      // mcp-bridge 设置了 context7（默认 endpoint）
+      const bridge = await import('../src/mcp-bridge.js')
+      bridge.setMcpBridgeServers({
+        context7: {
+          command: 'npx',
+          args: ['-y', '@upstash/context7-mcp@latest'],
+        },
+      })
+
+      const mod = await import('../src/qoder-language-model.js')
+      const model = new mod.QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    context7: {
+                      // 用户在 providerOptions 里覆盖 context7 指向不同版本
+                      command: 'npx',
+                      args: ['-y', '@upstash/context7-mcp@1.0.0'],
+                    },
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // providerOptions 覆盖 bridge，版本为 1.0.0
+      expect(lastQueryParams?.options?.mcpServers?.context7?.args).toEqual(['-y', '@upstash/context7-mcp@1.0.0'])
+    })
+
+    it('mcp-bridge 为空时 query() 不传 mcpServers', async () => {
+      pushSuccessResult()
+
+      // bridge 已在 beforeEach 中重置为空
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastQueryParams?.options?.mcpServers).toBeUndefined()
+    })
+
+    // ── MCP proxy 工具名转换：mcp__server__tool → server_tool ──
+
+    it('CLI mcp__context7__* 转换为 context7_* 后匹配 opencode function tool', async () => {
+      // CLI 发出 mcp__context7__resolve-library-id（CLI MCP proxy 格式）
+      // opencode tools 有 context7_resolve-library-id（opencode 格式）
+      // normalizeToolName 转换后能匹配 → 正常发出，不带 providerExecuted
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_mcp_001', name: 'mcp__context7__resolve-library-id' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"libraryName":"react"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushTextDelta('Done.')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              // opencode 有 context7 的 function 工具
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'context7_resolve-library-id', description: 'Resolve library', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // mcp__context7__resolve-library-id → context7_resolve-library-id（匹配 functionToolNames）
+      // → isProviderExecuted=false → 正常发出，不带 providerExecuted
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect((toolCall as any).toolName).toBe('context7_resolve-library-id')
+      expect((toolCall as any).providerExecuted).toBeUndefined()
+
+      // 文本仍然正常输出
+      const deltas = parts.filter((p) => p.type === 'text-delta')
+      expect(deltas.map((p) => (p as any).delta).join('')).toBe('Done.')
+    })
+
+    it('CLI mcp__* 工具不在 opencode tools 中时，不发出 tool 事件', async () => {
+      // CLI 发出 mcp__context7__resolve-library-id，但 opencode 没有 context7 相关工具
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_mcp_002', name: 'mcp__context7__resolve-library-id' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"libraryName":"react"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_mcp_002', content: 'react docs' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              // opencode 没有 context7 工具
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // context7_resolve-library-id 不在 functionToolNames → isProviderExecuted=true → 不发事件
+      const toolEvents = parts.filter((p) =>
+        ['tool-input-start', 'tool-input-delta', 'tool-input-end', 'tool-call', 'tool-result'].includes(p.type)
+      )
+      expect(toolEvents).toHaveLength(0)
+    })
+
+    it('CLI 大写工具（Read）正确映射到 opencode 小写工具（read）', async () => {
+      // CLI 内部调用 Read（大写），opencode tools 有 read（小写）
+      // normalizeToolName 统一转小写后能正确匹配 → 作为 opencode 工具发出
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_read_001', name: 'Read' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"/tmp/file.txt"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_read_001', content: 'file contents' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: { filePath: { type: 'string' } } } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // CLI 的 Read（大写）经 normalizeToolName 转为 read（小写）→ 匹配 functionToolNames
+      // → isProviderExecuted=false → 正常发出 tool 事件（不带 providerExecuted）
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect((toolCall as any).toolName).toBe('read')
+      expect((toolCall as any).providerExecuted).toBeUndefined()
+    })
+
+    it('options.tools 为空时，CLI 的所有工具调用都发出（不过滤）', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_bash_001', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_bash_001', content: 'file.ts' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      // 不传 tools → shouldFilterTools = false → 不过滤
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('bash')
+    })
+
+    it('options.tools 有已知工具时，已知工具调用正常发出', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_bash_002', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"pwd"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_bash_002', content: '/home' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // bash 在 options.tools 里 → 正常发出
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('bash')
+    })
+
+    // ── 标准工具调用流（opencode 执行工具，不带 providerExecuted） ────────────
+
+    it('options.tools 中 function 类型工具调用不带 providerExecuted', async () => {
+      // CLI 发出 bash 工具调用（bash 在 options.tools 里是 function 类型）
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_func_001', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect((toolCall as any).toolName).toBe('bash')
+      // function 类型工具不带 providerExecuted → opencode 负责执行
+      expect((toolCall as any).providerExecuted).toBeUndefined()
+    })
+
+    it('CLI 内置工具（不在 options.tools 中）不向 opencode 发 tool 事件', async () => {
+      // CLI 发出 Bash（CLI 内置，大写），不在 options.tools 里
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_cli_001', name: 'Bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"echo hi"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_cli_001', content: 'hi' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      // options.tools 传入一个不同的工具（不含 bash/Bash）
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // CLI 内置工具（不在 options.tools 中）→ 不向 opencode 发任何 tool 事件
+      const toolEvents = parts.filter((p) =>
+        ['tool-input-start', 'tool-input-delta', 'tool-input-end', 'tool-call', 'tool-result'].includes(p.type)
+      )
+      expect(toolEvents).toHaveLength(0)
+    })
+
+    it('opencode 执行的 function 工具不发出 tool-result（opencode 自己处理）', async () => {
+      // CLI 发出 bash 工具调用，但 bash 是 function 类型（opencode 执行）
+      // CLI 后续发出 user tool_result，但我们不应 re-emit 给 opencode
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_func_002', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        // 这是 CLI 内部发的 tool_result，不应转发给 opencode
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_func_002', content: '/home' }] },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // function 工具 → opencode 执行，不应有 tool-result 被 re-emit
+      const toolResults = parts.filter((p) => p.type === 'tool-result')
+      expect(toolResults).toHaveLength(0)
+    })
+
+    it('双轨 MCP：即使 opencode 有对应的 function 工具，mcp-bridge 的 servers 仍传给 CLI', async () => {
+      pushSuccessResult()
+
+      // mcp-bridge 中设置了 context7，同时 options.tools 里有 function 类型的 context7 工具
+      // 双轨策略下 CLI 也需要连接 context7 来自主完成 agent loop
+      const bridge = await import('../src/mcp-bridge.js')
+      bridge.setMcpBridgeServers({
+        context7: {
+          command: 'npx',
+          args: ['-y', '@upstash/context7-mcp@latest'],
+        },
+      })
+
+      const mod = await import('../src/qoder-language-model.js')
+      const model = new mod.QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              // opencode 传入了 context7 的 function 工具
+              tools: [
+                { type: 'function', name: 'context7_resolve-library-id', description: 'Resolve library', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'context7_get-library-docs', description: 'Get docs', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // 双轨 MCP：CLI 也需要连接 context7，不过滤
+      expect(lastQueryParams?.options?.mcpServers?.context7).toBeDefined()
+      expect(lastQueryParams.options.mcpServers.context7.command).toBe('npx')
+      expect(lastQueryParams.options.mcpServers.context7.args).toEqual(['-y', '@upstash/context7-mcp@latest'])
     })
   })
 })

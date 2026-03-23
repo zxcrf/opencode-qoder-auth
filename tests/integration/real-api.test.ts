@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { QoderLanguageModel } from '../../src/qoder-language-model.js'
+import { setMcpBridgeServers } from '../../src/mcp-bridge.js'
 
 // 设置较长超时，真实 API 调用可能需要 30s+
 const TIMEOUT = 60_000
@@ -127,5 +128,98 @@ describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
     console.log('[integration] multimodal response:', fullText)
     // 验证多模态图片传输链路正常（模型能返回文字内容即可）
     expect(fullText.length).toBeGreaterThan(0)
+  })
+})
+
+// ── context7 MCP 工具调用调试测试 ─────────────────────────────────────────────
+// 直接运行：npx vitest run tests/integration/real-api.test.ts --reporter=verbose
+
+describe.skip('context7 MCP tool call debug', { timeout: TIMEOUT }, () => {
+  it('观察 CLI 在有 mcpServers=context7 时发出的工具名格式', async () => {
+    setMcpBridgeServers({
+      context7: {
+        command: 'npx',
+        args: ['-y', '@upstash/context7-mcp@latest'],
+      },
+    })
+
+    const model = new QoderLanguageModel('lite')
+    const { stream } = await model.doStream({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              // 强制模型用 context7 查一个库，拿到工具名格式
+              text: 'Use context7 to get the latest React documentation. Call resolve-library-id for "react" first.',
+            },
+          ],
+        },
+      ],
+    })
+
+    const parts: Array<Record<string, unknown>> = []
+    const reader = stream.getReader()
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      const p = value as Record<string, unknown>
+      parts.push(p)
+      // 实时打印每个 part
+      if (p.type !== 'text-delta') {
+        console.log('[context7-debug] part:', JSON.stringify(p))
+      }
+    }
+
+    const toolStarts = parts.filter((p) => p.type === 'tool-input-start')
+    const toolCalls = parts.filter((p) => p.type === 'tool-call')
+
+    console.log('[context7-debug] tool-input-start events:', JSON.stringify(toolStarts, null, 2))
+    console.log('[context7-debug] tool-call events:', JSON.stringify(toolCalls, null, 2))
+    console.log('[context7-debug] all tool names seen:', toolStarts.map((p) => p.toolName))
+
+    // 至少看到一个 tool 事件（无论命名格式如何）
+    expect(toolStarts.length + toolCalls.length).toBeGreaterThan(0)
+  })
+
+  it('观察不传 mcpServers 时 CLI 是否还会尝试调用 context7', async () => {
+    // 清空 mcp-bridge（不传任何 MCP server）
+    setMcpBridgeServers({})
+
+    const model = new QoderLanguageModel('lite')
+    const { stream } = await model.doStream({
+      inputFormat: 'prompt',
+      mode: { type: 'regular' },
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Use context7 to get the latest React documentation. Call resolve-library-id for "react" first.',
+            },
+          ],
+        },
+      ],
+    })
+
+    const parts: Array<Record<string, unknown>> = []
+    const reader = stream.getReader()
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      parts.push(value as Record<string, unknown>)
+    }
+
+    const toolStarts = parts.filter((p) => p.type === 'tool-input-start')
+    console.log('[no-mcp-debug] tool-input-start events:', JSON.stringify(toolStarts, null, 2))
+    console.log('[no-mcp-debug] tool names:', toolStarts.map((p) => p.toolName))
+
+    const textParts = parts.filter((p) => p.type === 'text-delta')
+    const fullText = textParts.map((p) => p.delta as string).join('')
+    console.log('[no-mcp-debug] response text:', fullText.slice(0, 200))
   })
 })

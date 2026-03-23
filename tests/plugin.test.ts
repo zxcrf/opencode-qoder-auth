@@ -73,5 +73,73 @@ describe('QoderProviderPlugin', () => {
       expect(config.provider!['qoder'].npm).toBe('my-custom-qoder-provider')
       expect(config.provider!['qoder'].models!['custom-model']).toBeDefined()
     })
+
+    it('从 config.mcp 提取 stdio 类型 MCP 服务器并注入 mcpBridge', async () => {
+      const hooks = await pluginModule.QoderProviderPlugin({} as any)
+      const config: Config = {
+        mcp: {
+          context7: {
+            type: 'local',
+            command: ['npx', '-y', '@upstash/context7-mcp@latest'],
+          },
+        },
+      } as Config
+      await hooks.config!(config)
+
+      // 注入后，qoder-language-model 应能获取 context7 mcpServer
+      const { getMcpBridgeServers } = await import('../src/mcp-bridge.js')
+      const servers = getMcpBridgeServers()
+      expect(servers).toBeDefined()
+      expect(servers['context7']).toBeDefined()
+      expect(servers['context7'].command).toBe('npx')
+      expect(servers['context7'].args).toEqual(['-y', '@upstash/context7-mcp@latest'])
+    })
+
+    it('从 config.mcp 提取 remote 类型 MCP 服务器', async () => {
+      const hooks = await pluginModule.QoderProviderPlugin({} as any)
+      const config: Config = {
+        mcp: {
+          'github-mcp': {
+            type: 'remote',
+            url: 'https://mcp.example.com/github',
+          },
+        },
+      } as Config
+      await hooks.config!(config)
+
+      const { getMcpBridgeServers } = await import('../src/mcp-bridge.js')
+      const servers = getMcpBridgeServers()
+      expect(servers['github-mcp']).toBeDefined()
+      expect(servers['github-mcp'].type).toBe('http')
+      expect(servers['github-mcp'].url).toBe('https://mcp.example.com/github')
+    })
+
+    it('config.mcp 中 enabled=false 的服务器不注入', async () => {
+      const hooks = await pluginModule.QoderProviderPlugin({} as any)
+      const config: Config = {
+        mcp: {
+          disabled: {
+            type: 'local',
+            command: ['npx', 'some-mcp'],
+            enabled: false,
+          },
+        },
+      } as Config
+      await hooks.config!(config)
+
+      const { getMcpBridgeServers } = await import('../src/mcp-bridge.js')
+      const servers = getMcpBridgeServers()
+      expect(servers['disabled']).toBeUndefined()
+    })
+
+    it('config.mcp 为空时不注入 mcpBridge', async () => {
+      const hooks = await pluginModule.QoderProviderPlugin({} as any)
+      const config: Config = {} as Config
+      await hooks.config!(config)
+
+      const { getMcpBridgeServers } = await import('../src/mcp-bridge.js')
+      const servers = getMcpBridgeServers()
+      expect(Object.keys(servers).length).toBe(0)
+    })
   })
 })

@@ -19,6 +19,7 @@ import {
 } from './vendor/qoder-agent-sdk.mjs'
 
 import { buildPromptFromOptions } from './prompt-builder.js'
+import { getMcpBridgeServers } from './mcp-bridge.js'
 
 // ── storageDir 解析 — 优先 ~/.qoderwork（QoderWork 登录），回退 ~/.qoder ───────
 function resolveStorageDir(): string {
@@ -95,24 +96,32 @@ function resolveQoderCLI(): string | undefined {
 
 // ── 工具名称标准化 ────────────────────────────────────────────────────────────
 
+/**
+ * CLI 工具名 → opencode 工具名 的标准化映射：
+ *   - 大小写：Read → read, Bash → bash
+ *   - CLI 内置特殊名：AskUserQuestion → question
+ *   - MCP proxy 格式：mcp__context7__resolve-library-id → context7_resolve-library-id
+ *     （CLI 用双下划线 mcp__{server}__{tool}，opencode 用单下划线 {server}_{tool}）
+ */
 function normalizeToolName(name: string): string {
   const lower = name.toLowerCase()
   if (lower === 'askuserquestion') return 'question'
+  // CLI MCP proxy 格式：mcp__{serverName}__{toolName} → {serverName}_{toolName}
+  if (lower.startsWith('mcp__')) {
+    const withoutPrefix = lower.slice(5) // 去掉 'mcp__'
+    // 找到第二个 __ 分隔符（serverName 和 toolName 之间）
+    const separatorIdx = withoutPrefix.indexOf('__')
+    if (separatorIdx > 0) {
+      const serverName = withoutPrefix.slice(0, separatorIdx)
+      const toolName = withoutPrefix.slice(separatorIdx + 2)
+      return `${serverName}_${toolName}`
+    }
+    // 没有第二个 __，直接去掉 mcp__ 前缀
+    return withoutPrefix
+  }
   return lower
 }
 
-// ── 工具结果内容标准化 ────────────────────────────────────────────────────────
-
-function normalizeToolResultContent(
-  toolName: string,
-  content: unknown,
-): { output: string; title: string; metadata: Record<string, unknown> } {
-  return {
-    output: typeof content === 'string' ? content : JSON.stringify(content ?? null, null, 2),
-    title: toolName,
-    metadata: {},
-  }
-}
 
 // ── MCP server config 转换 ────────────────────────────────────────────────────
 
@@ -138,9 +147,14 @@ function buildQoderQueryOptions(
   mcpServers?: Record<string, QoderMcpServerConfig>
 } {
   const providerOptions = getQoderProviderOptions(options.providerOptions)
+
+  // 双轨 MCP 策略：CLI 和 opencode 各自独立连接 MCP servers
+  // CLI 通过 mcp__{server}__{tool} 格式调用，opencode 通过 {server}_{tool} 格式调用
+  // 不过滤 opencode 已管理的 servers — CLI 需要自主使用外部 MCP 工具完成 agent loop
   const mcpServers = {
-    ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),
-    ...extractMcpServersFromTools(options.tools),
+    ...getMcpBridgeServers(),                                                  // config.mcp 桥接（全量传递，不过滤）
+    ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),      // providerOptions 覆盖（高优先级）
+    ...extractMcpServersFromTools(options.tools),                              // provider-defined tools（最高优先级）
   }
 
   return {
@@ -289,6 +303,18 @@ export class QoderLanguageModel implements LanguageModelV2 {
     const cliPath = resolveQoderCLI()
     const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath)
 
+    // opencode function 工具名集合（由 opencode 管理并执行，如 bash、read、context7_resolve-library-id 等）
+    // 这些工具调用不带 providerExecuted，让 opencode 负责执行
+    // CLI 内置工具（Bash/Read/Write 等）经 normalizeToolName 转小写后若匹配则由 opencode 执行
+    // CLI MCP proxy 工具（mcp__server__tool）经 normalizeToolName 转为 server_tool 后若匹配同理
+    // 不在此集合中的工具由 CLI 自行执行 — 不向 opencode 发 tool 事件
+    const hasTools = (options.tools ?? []).some((t) => t.type === 'function')
+    const functionToolNames = new Set(
+      (options.tools ?? [])
+        .filter((t) => t.type === 'function')
+        .map((t) => normalizeToolName(t.name))
+    )
+
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       start: async (controller) => {
         // ── text block 状态管理 ──────────────────────────────────────────
@@ -297,14 +323,14 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
         // stream_event 路径：按 index 跟踪活跃内容块
         const activeStreamTextBlocks = new Set<number>()
-        const streamToolBlocks = new Map<number, { id: string; name: string; input: string }>()
+        const streamToolBlocks = new Map<number, { id: string; name: string; input: string; isProviderExecuted: boolean }>()
 
         // 已通过 stream_event 发出的标志（防 assistant 消息重复发）
         let sawStreamEventText = false
         let sawStreamEventTool = false
 
-        // tool_use_id → {toolName, input} 映射（用于 tool_result 时查找 toolName）
-        const pendingToolCalls = new Map<string, { toolName: string; input: string }>()
+        // tool_use_id → {toolName, input, isProviderExecuted} 映射（用于 tool_result 时查找）
+        const pendingToolCalls = new Map<string, { toolName: string; input: string; isProviderExecuted: boolean }>()
 
         try {
           // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
@@ -323,13 +349,16 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
                   sawStreamEventTool = true
                   const toolName = normalizeToolName(block.name)
-                  streamToolBlocks.set(idx, { id: block.id, name: toolName, input: '' })
-                  controller.enqueue({
-                    type: 'tool-input-start',
-                    id: block.id,
-                    toolName,
-                    providerExecuted: true,
-                  } as LanguageModelV2StreamPart)
+                  // normalizeToolName 统一处理：大小写 + AskUserQuestion→question + mcp__server__tool→server_tool
+                  const isProviderExecuted = hasTools && !functionToolNames.has(toolName)
+                  streamToolBlocks.set(idx, { id: block.id, name: toolName, input: '', isProviderExecuted })
+                  if (!isProviderExecuted) {
+                    controller.enqueue({
+                      type: 'tool-input-start',
+                      id: block.id,
+                      toolName,
+                    } as LanguageModelV2StreamPart)
+                  }
                 } else if (block.type === 'text') {
                   activeStreamTextBlocks.add(idx)
                   controller.enqueue({ type: 'text-start', id: String(idx) })
@@ -349,11 +378,13 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   const toolBlock = streamToolBlocks.get(idx)
                   if (toolBlock) {
                     toolBlock.input += delta.partial_json
-                    controller.enqueue({
-                      type: 'tool-input-delta',
-                      id: toolBlock.id,
-                      delta: delta.partial_json,
-                    } as LanguageModelV2StreamPart)
+                    if (!toolBlock.isProviderExecuted) {
+                      controller.enqueue({
+                        type: 'tool-input-delta',
+                        id: toolBlock.id,
+                        delta: delta.partial_json,
+                      } as LanguageModelV2StreamPart)
+                    }
                   }
                 }
               } else if (ev.type === 'content_block_stop') {
@@ -361,15 +392,20 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 const toolBlock = streamToolBlocks.get(idx)
 
                 if (toolBlock) {
-                  controller.enqueue({ type: 'tool-input-end', id: toolBlock.id } as LanguageModelV2StreamPart)
-                  controller.enqueue({
-                    type: 'tool-call',
-                    toolCallId: toolBlock.id,
+                  if (!toolBlock.isProviderExecuted) {
+                    controller.enqueue({ type: 'tool-input-end', id: toolBlock.id } as LanguageModelV2StreamPart)
+                    controller.enqueue({
+                      type: 'tool-call',
+                      toolCallId: toolBlock.id,
+                      toolName: toolBlock.name,
+                      input: toolBlock.input,
+                    } as LanguageModelV2StreamPart)
+                  }
+                  pendingToolCalls.set(toolBlock.id, {
                     toolName: toolBlock.name,
                     input: toolBlock.input,
-                    providerExecuted: true,
-                  } as LanguageModelV2StreamPart)
-                  pendingToolCalls.set(toolBlock.id, { toolName: toolBlock.name, input: toolBlock.input })
+                    isProviderExecuted: toolBlock.isProviderExecuted,
+                  })
                   streamToolBlocks.delete(idx)
                 } else if (activeStreamTextBlocks.has(idx)) {
                   controller.enqueue({ type: 'text-end', id: String(idx) })
@@ -391,27 +427,31 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   controller.enqueue({ type: 'text-end', id: textId })
                 } else if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string' && !sawStreamEventTool) {
                   const toolName = normalizeToolName(block.name)
-                  const inputJson = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {})
-                  controller.enqueue({
-                    type: 'tool-input-start',
-                    id: block.id,
-                    toolName,
-                    providerExecuted: true,
-                  } as LanguageModelV2StreamPart)
-                  controller.enqueue({
-                    type: 'tool-input-delta',
-                    id: block.id,
-                    delta: inputJson,
-                  } as LanguageModelV2StreamPart)
-                  controller.enqueue({ type: 'tool-input-end', id: block.id } as LanguageModelV2StreamPart)
-                  controller.enqueue({
-                    type: 'tool-call',
-                    toolCallId: block.id,
-                    toolName,
-                    input: inputJson,
-                    providerExecuted: true,
-                  } as LanguageModelV2StreamPart)
-                  pendingToolCalls.set(block.id, { toolName, input: inputJson })
+                  // normalizeToolName 统一处理：大小写 + AskUserQuestion→question + mcp__server__tool→server_tool
+                  const isProviderExecuted = hasTools && !functionToolNames.has(toolName)
+                  pendingToolCalls.set(block.id, { toolName, input: '', isProviderExecuted })
+                  if (!isProviderExecuted) {
+                    const inputJson = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {})
+                    controller.enqueue({
+                      type: 'tool-input-start',
+                      id: block.id,
+                      toolName,
+                    } as LanguageModelV2StreamPart)
+                    controller.enqueue({
+                      type: 'tool-input-delta',
+                      id: block.id,
+                      delta: inputJson,
+                    } as LanguageModelV2StreamPart)
+                    controller.enqueue({ type: 'tool-input-end', id: block.id } as LanguageModelV2StreamPart)
+                    controller.enqueue({
+                      type: 'tool-call',
+                      toolCallId: block.id,
+                      toolName,
+                      input: inputJson,
+                    } as LanguageModelV2StreamPart)
+                    // 更新 input 到 pendingToolCalls
+                    pendingToolCalls.set(block.id, { toolName, input: inputJson, isProviderExecuted })
+                  }
                 }
               }
 
@@ -426,28 +466,14 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 const toolCall = pendingToolCalls.get(block.tool_use_id)
                 if (!toolCall) continue
 
-                controller.enqueue({
-                  type: 'tool-result',
-                  toolCallId: block.tool_use_id,
-                  toolName: toolCall.toolName,
-                  result: normalizeToolResultContent(toolCall.toolName, block.content),
-                  providerExecuted: true,
-                } as LanguageModelV2StreamPart)
+                // CLI 内置工具（isProviderExecuted=true）的结果不转发给 opencode
+                // function 工具（isProviderExecuted=false）由 opencode 执行，CLI 也会发 tool_result 但不需转发
                 pendingToolCalls.delete(block.tool_use_id)
               }
 
             // ── result：会话结束 ────────────────────────────────────────
             } else if (m.type === 'result') {
-              // 对任何残留未匹配的 tool call，补一个空结果
-              for (const [toolCallId, toolCall] of pendingToolCalls) {
-                controller.enqueue({
-                  type: 'tool-result',
-                  toolCallId,
-                  toolName: toolCall.toolName,
-                  result: normalizeToolResultContent(toolCall.toolName, null),
-                  providerExecuted: true,
-                } as LanguageModelV2StreamPart)
-              }
+              // 清理残留 pending 工具调用
               pendingToolCalls.clear()
 
               // 关闭所有未关闭的文本块
