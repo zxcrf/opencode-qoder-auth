@@ -25,6 +25,7 @@ function hasImageContent(prompt: LanguageModelV2Prompt): boolean {
     if (message.role === 'user' && Array.isArray(message.content)) {
       for (const part of message.content) {
         if (part.type === 'image') return true
+        if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) return true
       }
     }
   }
@@ -188,6 +189,37 @@ async function* buildAsyncIterablePrompt(
               source: { type: 'base64', media_type: mediaType, data: base64 },
             })
           }
+        } else if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) {
+          // clipboard / --file 图片，AI SDK v2 以 type='file' 传入
+          const { data, mediaType } = part
+          let base64Data: string
+          let resolvedMediaType = mediaType
+          if (data instanceof Uint8Array) {
+            base64Data = Buffer.from(data).toString('base64')
+          } else if (typeof data === 'string') {
+            const match = data.match(/^data:([^;]+);base64,(.+)$/)
+            if (match) {
+              resolvedMediaType = match[1]
+              base64Data = match[2]
+            } else {
+              // 裸 base64 字符串
+              base64Data = data
+            }
+          } else {
+            // URL 对象
+            const urlStr = (data as URL).toString()
+            const match = urlStr.match(/^data:([^;]+);base64,(.+)$/)
+            if (match) {
+              resolvedMediaType = match[1]
+              base64Data = match[2]
+            } else {
+              continue // HTTP URL 暂不支持
+            }
+          }
+          contentBlocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: resolvedMediaType, data: base64Data },
+          })
         }
       }
 

@@ -153,6 +153,89 @@ describe('buildPromptFromOptions', () => {
     ])
   })
 
+  // === TDD: clipboard image fix (type='file' parts) ===
+
+  it('file part (image mediaType) 触发 AsyncIterable 路径', () => {
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [{
+          type: 'file',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe',
+          mediaType: 'image/png',
+        }],
+      }],
+    })
+    expect(typeof result).not.toBe('string')
+  })
+
+  it('file part 裸 base64 data → image content block', async () => {
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: b64, mediaType: 'image/png' },
+          { type: 'text', text: 'describe this' },
+        ],
+      }],
+    })
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    expect((messages[0] as any).message.content).toContainEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: b64 },
+    })
+  })
+
+  it('file part data: URL → 正确提取 base64', async () => {
+    const b64 = 'abc123=='
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [{ type: 'file', data: `data:image/png;base64,${b64}`, mediaType: 'image/png' }],
+      }],
+    })
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    expect((messages[0] as any).message.content[0]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: b64 },
+    })
+  })
+
+  it('file part Uint8Array → 转换为 base64', async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71])
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [{ type: 'file', data: bytes, mediaType: 'image/png' }],
+      }],
+    })
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const block = (messages[0] as any).message.content[0]
+    expect(block.type).toBe('image')
+    expect(block.source.type).toBe('base64')
+    expect(block.source.media_type).toBe('image/png')
+    expect(block.source.data).toBe(Buffer.from(bytes).toString('base64'))
+  })
+
+  it('file part 非图片 mediaType 不触发图片路径', () => {
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [{ type: 'file', data: 'aGVsbG8=', mediaType: 'text/plain' }],
+      }],
+    })
+    expect(typeof result).toBe('string')
+  })
+
   it('多模态模式：非 user 历史以 <conversation_history> 注入下一条 user 消息', async () => {
     const prompt = buildPromptFromOptions({
       ...BASE_OPTIONS,
