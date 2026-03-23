@@ -858,6 +858,195 @@ describe('QoderLanguageModel', () => {
       expect(lastQueryParams.options.mcpServers.context7.command).toBe('npx')
       expect(lastQueryParams.options.mcpServers.context7.args).toEqual(['-y', '@upstash/context7-mcp@latest'])
     })
+
+    // ── tool-call input 格式：必须是已解析的对象，不是 JSON 字符串 ──────────
+
+    it('stream_event 路径：tool-call 的 input 是 JSON 字符串（AI SDK 内部 trim+parse）', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_input_001', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls -la","timeout":30}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      // AI SDK 期望 input 是 JSON 字符串（内部调用 input.trim() 再 JSON.parse）
+      expect(typeof (toolCall as any).input).toBe('string')
+      expect(JSON.parse((toolCall as any).input)).toEqual({ command: 'ls -la', timeout: 30 })
+    })
+
+    it('assistant 路径：tool-call 的 input 是 JSON 字符串', async () => {
+      // assistant 消息中 tool_use 的 input 是对象，需要序列化为 JSON 字符串
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_input_002', name: 'read', input: { filePath: '/tmp/test.txt' } },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect(typeof (toolCall as any).input).toBe('string')
+      expect(JSON.parse((toolCall as any).input)).toEqual({ filePath: '/tmp/test.txt' })
+    })
+
+    it('assistant 路径：tool_use input 是字符串时，直接透传', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_input_003', name: 'bash', input: '{"command":"pwd"}' },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect(typeof (toolCall as any).input).toBe('string')
+      expect((toolCall as any).input).toBe('{"command":"pwd"}')
+    })
+
+    // ── finishReason：有 tool-call 时应为 'tool-calls' ─────────────────────
+
+    it('有 function tool-call 时 finishReason 为 tool-calls', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_finish_001', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // 有 tool-call 发出时，finishReason 应为 'tool-calls' 而非 'stop'
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('只有 providerExecuted tool-call 时 finishReason 仍为 stop', async () => {
+      // CLI 调用 Bash（不在 options.tools 中）→ providerExecuted → 不对 opencode 发 tool-call
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_finish_002', name: 'Bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // 没有向 opencode 发出 tool-call（都是 providerExecuted）→ finishReason = stop
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('stop')
+    })
+
+    it('无 tools 时纯文本 finishReason 仍为 stop', async () => {
+      pushTextDelta('hello')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('stop')
+    })
   })
 })
 

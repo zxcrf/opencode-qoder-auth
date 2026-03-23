@@ -332,6 +332,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
         // tool_use_id → {toolName, input, isProviderExecuted} 映射（用于 tool_result 时查找）
         const pendingToolCalls = new Map<string, { toolName: string; input: string; isProviderExecuted: boolean }>()
 
+        // 是否向 opencode 发出了 function tool-call（决定 finishReason）
+        let emittedFunctionToolCall = false
+
         try {
           // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
           const qoderQuery = query({ prompt, options: qoderOptions })
@@ -400,6 +403,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                       toolName: toolBlock.name,
                       input: toolBlock.input,
                     } as LanguageModelV2StreamPart)
+                    emittedFunctionToolCall = true
                   }
                   pendingToolCalls.set(toolBlock.id, {
                     toolName: toolBlock.name,
@@ -449,6 +453,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                       toolName,
                       input: inputJson,
                     } as LanguageModelV2StreamPart)
+                    emittedFunctionToolCall = true
                     // 更新 input 到 pendingToolCalls
                     pendingToolCalls.set(block.id, { toolName, input: inputJson, isProviderExecuted })
                   }
@@ -503,7 +508,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 const usage = m.usage as { input_tokens: number; output_tokens: number } | undefined
                 controller.enqueue({
                   type: 'finish',
-                  finishReason: 'stop',
+                  finishReason: emittedFunctionToolCall ? 'tool-calls' : 'stop',
                   usage: {
                     inputTokens: usage?.input_tokens ?? 0,
                     outputTokens: usage?.output_tokens ?? 0,
