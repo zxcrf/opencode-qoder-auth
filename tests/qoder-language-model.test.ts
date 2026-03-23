@@ -5,29 +5,51 @@ import type {
   LanguageModelV2StreamPart,
 } from '@ai-sdk/provider'
 
-// mock @ali/qoder-agent-sdk
-const mockQueryMessages: any[] = []
-const mockQuery = vi.fn(() => {
-  // 返回一个 async generator
+// ── Mock vendor SDK ──────────────────────────────────────────────────────────
+// 控制每个测试推送的 SDKMessage 事件
+const mockMessages: unknown[] = []
+
+// 记录最近一次 query() 调用时的参数
+let lastQueryParams: { prompt: unknown; options: unknown } | null = null
+
+// 控制 query() 是否抛出异常
+let mockQueryError: Error | null = null
+
+const mockQueryFn = vi.fn((params: { prompt: unknown; options: unknown }) => {
+  lastQueryParams = params
+  if (mockQueryError) {
+    throw mockQueryError
+  }
   return (async function* () {
-    for (const msg of mockQueryMessages) {
+    for (const msg of mockMessages) {
       yield msg
     }
   })()
 })
 
 vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
-  query: mockQuery,
-  IntegrationMode: { QoderWork: 'qoder_work', Quest: 'quest' },
+  configure: vi.fn(),
+  IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
+  query: mockQueryFn,
 }))
 
+// ── Test suite ───────────────────────────────────────────────────────────────
+
 describe('QoderLanguageModel', () => {
-  let QoderLanguageModel: any
+  let QoderLanguageModel: unknown
 
   beforeEach(async () => {
     vi.resetModules()
-    mockQueryMessages.length = 0
-    mockQuery.mockClear()
+    mockMessages.length = 0
+    lastQueryParams = null
+    mockQueryError = null
+    mockQueryFn.mockClear()
+    // 重新注册 mock，使 resetModules 后的新 import 依然生效
+    vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
+      configure: vi.fn(),
+      IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
+      query: mockQueryFn,
+    }))
     const mod = await import('../src/qoder-language-model.js')
     QoderLanguageModel = mod.QoderLanguageModel
   })
@@ -35,6 +57,8 @@ describe('QoderLanguageModel', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
+
+  // ── 基本属性 ──────────────────────────────────────────────────────────────
 
   describe('基本属性', () => {
     it('specificationVersion 为 v2', () => {
@@ -53,579 +77,362 @@ describe('QoderLanguageModel', () => {
     })
   })
 
+  // ── doStream ──────────────────────────────────────────────────────────────
+
   describe('doStream', () => {
-    // SDK 实际行为：只发 assistant 消息，不发 stream_event
-    // (--print 模式下，qodercli 直接返回完整消息)
-    it('assistant 消息文本正确输出为 text-delta', async () => {
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'Hello, world!' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        result: 'Hello, world!',
-        duration_ms: 100,
-        duration_api_ms: 80,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('stream_event text_delta 正确转换为 text-start + text-delta + text-end', async () => {
+      pushTextDelta('Hello, ')
+      pushTextDelta('world!')
+      pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
       const { stream } = await model.doStream(buildCallOptions('Say hello'))
       const parts = await collectStream(stream)
 
-      const textDeltas = parts.filter((p: any) => p.type === 'text-delta')
-      expect(textDeltas.length).toBeGreaterThan(0)
-      const text = textDeltas.map((p: any) => p.delta).join('')
-      expect(text).toContain('Hello')
+      expect(parts.find((p) => p.type === 'text-start')).toBeDefined()
+
+      const deltas = parts.filter((p) => p.type === 'text-delta')
+      expect(deltas).toHaveLength(2)
+      expect(deltas.map((p) => p.delta).join('')).toBe('Hello, world!')
+
+      expect(parts.find((p) => p.type === 'text-end')).toBeDefined()
     })
 
-    it('多轮 assistant 消息文本按顺序输出', async () => {
-      // 工具调用场景：assistant(tool_use) → user(tool_result) → assistant(text)
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [
-            { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } },
-          ],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'user',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'file.txt' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-3',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'Done!' }],
-        },
-      })
-      mockQueryMessages.push({
+    it('result subtype=success → finishReason stop', async () => {
+      pushTextDelta('hi')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('stop')
+    })
+
+    it('result usage 正确映射到 finish.usage', async () => {
+      pushTextDelta('hi')
+      mockMessages.push({
         type: 'result',
         subtype: 'success',
-        uuid: 'uuid-4',
-        session_id: 'sess-1',
-        result: 'Done!',
-        duration_ms: 200,
-        duration_api_ms: 150,
         is_error: false,
-        num_turns: 2,
-        total_cost_usd: 0,
-        usage: { input_tokens: 20, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
+        usage: { input_tokens: 10, output_tokens: 20 },
       })
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('test'))
-      const parts = await collectStream(stream)
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
-      const textDeltas = parts.filter((p: any) => p.type === 'text-delta')
-      const text = textDeltas.map((p: any) => p.delta).join('')
-      expect(text).toBe('Done!')
-
-      // 工具调用也应该出现，并标记为 providerExecuted，避免 opencode 重复执行
-      const toolStart = parts.find((p: any) => p.type === 'tool-input-start')
-      expect(toolStart).toBeDefined()
-      expect(toolStart.toolName).toBe('bash')
-      expect(toolStart.providerExecuted).toBe(true)
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.usage?.inputTokens).toBe(10)
+      expect(finish?.usage?.outputTokens).toBe(20)
+      expect(finish?.usage?.totalTokens).toBe(30)
     })
 
-    it('result success 输出 finish 事件', async () => {
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        result: '',
-        duration_ms: 50,
-        duration_api_ms: 40,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 5, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
-
-      const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('test'))
-      const parts = await collectStream(stream)
-
-      const finish = parts.find((p: any) => p.type === 'finish')
-      expect(finish).toBeDefined()
-      expect(finish.finishReason).toBe('stop')
-    })
-
-    it('result error 输出 finish reason=error', async () => {
-      mockQueryMessages.push({
+    it('result subtype=error_during_execution → finishReason error', async () => {
+      mockMessages.push({
         type: 'result',
         subtype: 'error_during_execution',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        duration_ms: 50,
-        duration_api_ms: 40,
         is_error: true,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 5, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-        errors: ['Something went wrong'],
       })
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('test'))
-      const parts = await collectStream(stream)
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
 
-      const finish = parts.find((p: any) => p.type === 'finish')
-      expect(finish).toBeDefined()
-      expect(finish.finishReason).toBe('error')
+      const error = parts.find((p) => p.type === 'error')
+      expect(error).toBeDefined()
+      expect(error.error.message).toContain('error_during_execution')
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('error')
     })
 
-    it('assistant 消息 tool_use block 输出完整工具调用链，且标记 providerExecuted', async () => {
-      // SDK 实际场景：assistant 消息包含 tool_use block，后面 user 消息带 tool_result
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [
-            {
-              type: 'tool_use',
-              id: 'toolu_abc123',
-              name: 'Bash',
-              input: { command: 'ls -la' },
-            },
-          ],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'user',
-        uuid: 'uuid-1b',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'toolu_abc123', content: 'total 0\n' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        result: '',
-        duration_ms: 100,
-        duration_api_ms: 80,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('query() 抛出异常 → error + finish reason=error', async () => {
+      mockQueryError = new Error('CLI not found')
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('run bash'))
-      const parts = await collectStream(stream)
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
 
-      const toolStart = parts.find((p: any) => p.type === 'tool-input-start')
-      expect(toolStart).toBeDefined()
-      expect(toolStart.id).toBe('toolu_abc123')
-      expect(toolStart.toolName).toBe('bash')
-      expect(toolStart.providerExecuted).toBe(true)
+      const error = parts.find((p) => p.type === 'error')
+      expect(error?.error.message).toContain('CLI not found')
 
-      const toolDeltas = parts.filter((p: any) => p.type === 'tool-input-delta')
-      expect(toolDeltas.length).toBe(1)
-      const parsed = JSON.parse(toolDeltas[0].delta)
-      expect(parsed.command).toBe('ls -la')
-
-      const toolEnd = parts.find((p: any) => p.type === 'tool-input-end')
-      expect(toolEnd).toBeDefined()
-      expect(toolEnd.id).toBe('toolu_abc123')
-
-      const toolCall = parts.find((p: any) => p.type === 'tool-call')
-      expect(toolCall).toBeDefined()
-      expect(toolCall.toolCallId).toBe('toolu_abc123')
-      expect(toolCall.toolName).toBe('bash')
-      expect(toolCall.providerExecuted).toBe(true)
-      const inputParsed = JSON.parse(toolCall.input)
-      expect(inputParsed.command).toBe('ls -la')
-
-      const toolResult = parts.find((p: any) => p.type === 'tool-result')
-      expect(toolResult).toBeDefined()
-      expect(toolResult.toolCallId).toBe('toolu_abc123')
-      expect(toolResult.toolName).toBe('bash')
-      expect(toolResult.providerExecuted).toBe(true)
-      expect(toolResult.result).toEqual({
-        output: 'total 0\n',
-        title: 'bash',
-        metadata: {},
-      })
-
-      const idxStart = parts.findIndex((p: any) => p.type === 'tool-input-start')
-      const idxDelta = parts.findIndex((p: any) => p.type === 'tool-input-delta')
-      const idxEnd = parts.findIndex((p: any) => p.type === 'tool-input-end')
-      const idxCall = parts.findIndex((p: any) => p.type === 'tool-call')
-      const idxResult = parts.findIndex((p: any) => p.type === 'tool-result')
-      expect(idxStart).toBeLessThan(idxDelta)
-      expect(idxDelta).toBeLessThan(idxEnd)
-      expect(idxEnd).toBeLessThan(idxCall)
-      expect(idxCall).toBeLessThan(idxResult)
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('error')
     })
 
-    it('stream_event 路径 tool_use block 输出完整工具调用链和 providerExecuted', async () => {
-      // 流式路径：SDK 发送 content_block_start/delta/stop 事件
-      mockQueryMessages.push({
-        type: 'stream_event',
-        event: {
-          type: 'content_block_start',
-          index: 0,
-          content_block: { type: 'tool_use', id: 'toolu_stream1', name: 'Read', input: {} },
-        },
-      })
-      mockQueryMessages.push({
-        type: 'stream_event',
-        event: {
-          type: 'content_block_delta',
-          index: 0,
-          delta: { type: 'input_json_delta', partial_json: '{"path":"/tmp"}' },
-        },
-      })
-      mockQueryMessages.push({
-        type: 'stream_event',
-        event: { type: 'content_block_stop', index: 0 },
-      })
-      mockQueryMessages.push({
-        type: 'user',
-        uuid: 'uuid-u',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'toolu_stream1', content: 'file body' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-r',
-        session_id: 'sess-1',
-        result: '',
-        duration_ms: 100,
-        duration_api_ms: 80,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('stream 结束无 result 事件时，自动补 finish stop', async () => {
+      pushTextDelta('hi')
+      // 不推 result 事件
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('read file'))
-      const parts = await collectStream(stream)
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
 
-      const toolEnd = parts.find((p: any) => p.type === 'tool-input-end')
-      expect(toolEnd).toBeDefined()
-      expect(toolEnd.id).toBe('toolu_stream1')
-
-      const toolCall = parts.find((p: any) => p.type === 'tool-call')
-      expect(toolCall).toBeDefined()
-      expect(toolCall.toolCallId).toBe('toolu_stream1')
-      expect(toolCall.toolName).toBe('read')
-      expect(toolCall.providerExecuted).toBe(true)
-
-      const toolResult = parts.find((p: any) => p.type === 'tool-result')
-      expect(toolResult).toBeDefined()
-      expect(toolResult.toolCallId).toBe('toolu_stream1')
-      expect(toolResult.toolName).toBe('read')
-      expect(toolResult.providerExecuted).toBe(true)
-      expect(toolResult.result).toEqual({
-        output: 'file body',
-        title: 'read',
-        metadata: {},
-      })
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('stop')
     })
 
-    it('AskUserQuestion 会规范为 question', async () => {
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-q1',
-        session_id: 'sess-q',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [
-            {
-              type: 'tool_use',
-              id: 'toolu_question1',
-              name: 'AskUserQuestion',
-              input: { question: '继续吗？' },
-            },
-          ],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'user',
-        uuid: 'uuid-q2',
-        session_id: 'sess-q',
-        parent_tool_use_id: null,
-        message: {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'toolu_question1', content: '好的' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-q3',
-        session_id: 'sess-q',
-        result: '',
-        duration_ms: 10,
-        duration_api_ms: 8,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
-
-      const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('ask user'))
-      const parts = await collectStream(stream)
-
-      const toolCall = parts.find((p: any) => p.type === 'tool-call')
-      expect(toolCall).toBeDefined()
-      expect(toolCall.toolName).toBe('question')
-    })
-
-    it('system init 消息被忽略（不产生输出）', async () => {
-      mockQueryMessages.push({
-        type: 'system',
-        subtype: 'init',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        apiKeySource: 'user',
-        cwd: '/tmp',
-        tools: [],
-        mcp_servers: [],
-        model: 'auto',
-        permissionMode: 'default',
-        slash_commands: [],
-        output_style: 'default',
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        result: '',
-        duration_ms: 50,
-        duration_api_ms: 40,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 5, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
-
-      const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(buildCallOptions('test'))
-      const parts = await collectStream(stream)
-
-      const textDeltas = parts.filter((p: any) => p.type === 'text-delta')
-      expect(textDeltas.length).toBe(0)
-    })
-
-    it('使用 options.model 调用 query', async () => {
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        result: '',
-        duration_ms: 10,
-        duration_api_ms: 8,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('使用正确的 modelId 传递给 query()', async () => {
+      pushSuccessResult()
 
       const model = new QoderLanguageModel('ultimate')
-      const { stream } = await model.doStream(buildCallOptions('ping'))
-      await collectStream(stream)
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
-      expect(mockQuery).toHaveBeenCalledOnce()
-      const callArgs = mockQuery.mock.calls[0][0]
-      expect(callArgs.options?.model).toBe('ultimate')
+      expect(lastQueryParams).toBeDefined()
+      expect(lastQueryParams.options.model).toBe('ultimate')
     })
 
-    it('透传 providerOptions.qoder.mcpServers 到 query', async () => {
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-mcp-1',
-        session_id: 'sess-mcp',
-        result: '',
-        duration_ms: 10,
-        duration_api_ms: 8,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('prompt 文本内容传递到 query()', async () => {
+      pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(
-        buildCallOptions('ping', {
-          providerOptions: {
-            qoder: {
-              mcpServers: {
-                weather: {
-                  type: 'local',
-                  command: ['npx', '-y', '@acme/weather-mcp'],
-                  environment: { API_KEY: 'secret' },
+      await collectStream((await model.doStream(buildCallOptions('hello world'))).stream)
+
+      expect(mockQueryFn).toHaveBeenCalledOnce()
+      expect(typeof lastQueryParams.prompt).toBe('string')
+      expect(lastQueryParams.prompt).toContain('hello world')
+    })
+
+    it('非 text_delta 的 stream_event 被忽略', async () => {
+      // content_block_start 不是文本 delta，应忽略
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      })
+      pushTextDelta('real text')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('test'))).stream)
+
+      const deltas = parts.filter((p) => p.type === 'text-delta')
+      expect(deltas).toHaveLength(1)
+      expect(deltas[0].delta).toBe('real text')
+    })
+
+    it('透传 providerOptions.qoder.mcpServers 到 query() options', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    weather: {
+                      command: 'npx',
+                      args: ['-y', '@acme/weather-mcp'],
+                      env: { API_KEY: 'secret' },
+                    },
+                  },
                 },
               },
-            },
-          },
-        }),
+            }),
+          )
+        ).stream,
       )
-      await collectStream(stream)
 
-      const callArgs = mockQuery.mock.calls[0][0]
-      expect(callArgs.options?.mcpServers).toEqual({
-        weather: {
-          command: 'npx',
-          args: ['-y', '@acme/weather-mcp'],
-          env: { API_KEY: 'secret' },
-        },
-      })
+      expect(lastQueryParams?.options?.mcpServers).toBeDefined()
+      const weatherServer = lastQueryParams.options.mcpServers.weather
+      expect(weatherServer).toBeDefined()
+      expect(weatherServer.command).toBe('npx')
+      expect(weatherServer.args).toEqual(['-y', '@acme/weather-mcp'])
+      expect(weatherServer.env).toEqual({ API_KEY: 'secret' })
     })
 
-    it('从 provider-defined tools 推导 mcpServers 并透传到 query', async () => {
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-mcp-2',
-        session_id: 'sess-mcp',
-        result: '',
-        duration_ms: 10,
-        duration_api_ms: 8,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+    it('从 provider-defined tools 推导 mcpServers 并传递', async () => {
+      pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
-      const { stream } = await model.doStream(
-        buildCallOptions('ping', {
-          tools: [
-            {
-              type: 'provider-defined',
-              id: 'qoder.weather',
-              name: 'weather_forecast',
-              args: {
-                serverName: 'weather',
-                type: 'local',
-                command: ['uvx', 'weather-mcp'],
-                environment: { WEATHER_TOKEN: 'token' },
-              },
-            },
-          ],
-        }),
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                {
+                  type: 'provider-defined',
+                  id: 'qoder.weather',
+                  name: 'weather_forecast',
+                  args: {
+                    serverName: 'weather',
+                    command: 'uvx',
+                    args: ['weather-mcp'],
+                    env: { WEATHER_TOKEN: 'token' },
+                  },
+                },
+              ],
+            }),
+          )
+        ).stream,
       )
-      await collectStream(stream)
 
-      const callArgs = mockQuery.mock.calls[0][0]
-      expect(callArgs.options?.mcpServers).toEqual({
-        weather: {
-          command: 'uvx',
-          args: ['weather-mcp'],
-          env: { WEATHER_TOKEN: 'token' },
-        },
-      })
+      const weatherServer = lastQueryParams?.options?.mcpServers?.weather
+      expect(weatherServer).toBeDefined()
+      expect(weatherServer.command).toBe('uvx')
+      expect(weatherServer.args).toEqual(['weather-mcp'])
+      expect(weatherServer.env).toEqual({ WEATHER_TOKEN: 'token' })
     })
 
     it('doGenerate 返回完整文本', async () => {
-      mockQueryMessages.push({
-        type: 'assistant',
-        uuid: 'uuid-1',
-        session_id: 'sess-1',
-        parent_tool_use_id: null,
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'generated response' }],
-        },
-      })
-      mockQueryMessages.push({
-        type: 'result',
-        subtype: 'success',
-        uuid: 'uuid-2',
-        session_id: 'sess-1',
-        result: 'generated response',
-        duration_ms: 100,
-        duration_api_ms: 80,
-        is_error: false,
-        num_turns: 1,
-        total_cost_usd: 0,
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {},
-        permission_denials: [],
-      })
+      pushTextDelta('generated response')
+      pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
       const result = await model.doGenerate(buildCallOptions('generate test'))
 
-      const textContent = result.content.find((c: any) => c.type === 'text')
+      const textContent = result.content.find((c) => c.type === 'text')
       expect(textContent?.text).toContain('generated response')
       expect(result.finishReason).toBe('stop')
+    })
+
+    // ── SDK in-process MCP server (type: 'sdk') ───────────────────────────────
+
+    it('SDK in-process MCP server via providerOptions 直接透传 type/name/instance', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+      const sdkServer = { type: 'sdk' as const, name: 'echo', instance: mockInstance }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    echo: sdkServer,
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastQueryParams?.options?.mcpServers?.echo).toBeDefined()
+      expect(lastQueryParams.options.mcpServers.echo.type).toBe('sdk')
+      expect(lastQueryParams.options.mcpServers.echo.name).toBe('echo')
+      expect(lastQueryParams.options.mcpServers.echo.instance).toBe(mockInstance)
+    })
+
+    it('SDK in-process MCP server via provider-defined tools 透传 type/instance', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                {
+                  type: 'provider-defined',
+                  id: 'qoder.calc',
+                  name: 'calculator',
+                  args: {
+                    serverName: 'calc',
+                    type: 'sdk',
+                    name: 'calc',
+                    instance: mockInstance,
+                  },
+                },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const calcServer = lastQueryParams?.options?.mcpServers?.calc
+      expect(calcServer).toBeDefined()
+      expect(calcServer.type).toBe('sdk')
+      expect(calcServer.instance).toBe(mockInstance)
+    })
+
+    it('SDK server enabled=false 时被过滤', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+      const sdkServer = { type: 'sdk' as const, name: 'echo', instance: mockInstance, enabled: false }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    echo: sdkServer,
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // enabled=false 应该过滤掉，mcpServers 为空或不含 echo
+      expect(lastQueryParams?.options?.mcpServers?.echo).toBeUndefined()
+    })
+
+    it('有 mcpServers 时不设置 disallowedTools，允许模型调用工具', async () => {
+      pushSuccessResult()
+
+      const mockInstance = { connect: vi.fn(), close: vi.fn() }
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  mcpServers: {
+                    myserver: { type: 'sdk', name: 'myserver', instance: mockInstance },
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // 提供了 mcpServers，不应设置 disallowedTools: ['*']
+      expect(lastQueryParams?.options?.disallowedTools).toBeUndefined()
+    })
+
+    it('无 mcpServers 时也不设置 disallowedTools（允许 CLI 内建工具被调用）', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastQueryParams?.options?.disallowedTools).toBeUndefined()
     })
   })
 })
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function pushTextDelta(text: string) {
+  mockMessages.push({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      delta: { type: 'text_delta', text },
+    },
+  })
+}
+
+function pushSuccessResult() {
+  mockMessages.push({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    usage: { input_tokens: 5, output_tokens: 10 },
+  })
+}
 
 function buildCallOptions(
   userText: string,

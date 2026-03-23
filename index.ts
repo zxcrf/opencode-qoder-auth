@@ -23,6 +23,11 @@ export const QoderProviderPlugin: Plugin = async () => {
           temperature: m.temperature,
           tool_call: m.tool_call,
           limit: m.limit,
+          // opencode 通过 modalities.input 判断是否支持图片输入（attachment 字段不参与此判断）
+          modalities: {
+            input: m.attachment ? ['text', 'image'] : ['text'],
+            output: ['text'],
+          },
         }
       }
 
@@ -43,9 +48,13 @@ export const QoderProviderPlugin: Plugin = async () => {
 
       // loader：检查本地登录态，已登录则静默通过，无需用户输入任何东西
       async loader(getAuth) {
-        const authFile = join(homedir(), '.qoder', '.auth', 'user')
-        if (existsSync(authFile)) {
-          // 已登录，返回空 options 即可，SDK 会自动读取 ~/.qoder/.auth/user
+        // 优先检查 QoderWork 登录（~/.qoderwork），回退到 Qoder CLI（~/.qoder）
+        const authFiles = [
+          join(homedir(), '.qoderwork', '.auth', 'user'),
+          join(homedir(), '.qoder', '.auth', 'user'),
+        ]
+        if (authFiles.some(existsSync)) {
+          // 已登录，返回空 options 即可，SDK 会自动读取认证文件
           return {}
         }
         // 未登录，返回空对象让 opencode 触发 auth UI
@@ -56,16 +65,19 @@ export const QoderProviderPlugin: Plugin = async () => {
         {
           type: 'api',
           // label 作为 opencode auth UI 里的提示文案
-          label: 'Run `qoder login` in your terminal to authenticate',
+          label: 'Open QoderWork and log in, or run `qoder login` in your terminal',
           // 没有需要用户填写的字段
           prompts: [],
           async authorize() {
-            const authFile = join(homedir(), '.qoder', '.auth', 'user')
-            if (existsSync(authFile)) {
-              // 已经通过 qoder login 完成登录，标记为成功
+            const authFiles = [
+              join(homedir(), '.qoderwork', '.auth', 'user'),
+              join(homedir(), '.qoder', '.auth', 'user'),
+            ]
+            if (authFiles.some(existsSync)) {
+              // 已经完成登录，标记为成功
               return { type: 'success', key: 'qoder-cli-auth' }
             }
-            // 未登录，提示用户去终端执行 qoder login
+            // 未登录，提示用户登录
             return { type: 'failed' }
           },
         },
