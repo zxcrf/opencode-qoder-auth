@@ -73,6 +73,16 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     limit: { context: 180000, output: 32768 },
   },
+  q35model_preview: {
+    id: 'q35model_preview',
+    name: 'Pitaya-03-20',
+    attachment: false,
+    reasoning: false,
+    temperature: false,
+    tool_call: true,
+    cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+    limit: { context: 180000, output: 32768 },
+  },
   qmodel: {
     id: 'qmodel',
     name: 'Qwen-Coder-Qoder-1.0 (0.2x)',

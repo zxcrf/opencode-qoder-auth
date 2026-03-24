@@ -196,6 +196,22 @@ describe('QoderLanguageModel', () => {
       expect(lastQueryParams?.options?.maxBufferSize).toBe(8 * 1024 * 1024)
     })
 
+    it('每次 query() 都使用新的 sessionId，避免错误续用旧会话', async () => {
+      pushSuccessResult()
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('first turn'))).stream)
+      const firstSessionId = lastQueryParams?.options?.sessionId
+
+      await collectStream((await model.doStream(buildCallOptions('second turn'))).stream)
+      const secondSessionId = lastQueryParams?.options?.sessionId
+
+      expect(typeof firstSessionId).toBe('string')
+      expect(typeof secondSessionId).toBe('string')
+      expect(firstSessionId).not.toBe(secondSessionId)
+    })
+
     it('非 text_delta 的 stream_event 被忽略', async () => {
       // content_block_start 不是文本 delta，应忽略
       mockMessages.push({
@@ -1129,6 +1145,43 @@ describe('QoderLanguageModel', () => {
       const toolCall = parts.find((p) => p.type === 'tool-call')
       expect(JSON.parse((toolCall as any).input)).toEqual({
         todos: [{ content: 'Task A', status: 'pending', priority: 'medium' }],
+      })
+    })
+
+    it('Skill 工具参数从 skill 映射为 name', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_map_skill',
+              name: 'Skill',
+              input: {
+                skill: 'simplify',
+              },
+            },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'skill', description: 'Load skill', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(JSON.parse((toolCall as any).input)).toEqual({
+        name: 'simplify',
       })
     })
 

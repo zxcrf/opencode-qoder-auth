@@ -37,7 +37,7 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-That's it. The plugin automatically injects the `qoder` provider and all 10 models — no `provider` block needed.
+That's it. The plugin automatically injects the `qoder` provider and all 11 models — no `provider` block needed.
 
 ---
 
@@ -65,6 +65,7 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
+| `q35model_preview` | Pitaya-03-20 | 180K | 32K | ✗ | ✗ |
 | `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
 | `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
 | `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
@@ -139,7 +140,7 @@ npm install -g opencode-ai
 }
 ```
 
-就这样。插件会自动注入完整的 `qoder` provider 和所有模型，**无需手写任何 `provider` 配置**。
+就这样。插件会自动注入完整的 `qoder` provider 和全部 11 个模型，**无需手写任何 `provider` 配置**。
 
 ---
 
@@ -167,6 +168,7 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
+| `q35model_preview` | Pitaya-03-20 | 180K | 32K | ✗ | ✗ |
 | `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
 | `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
 | `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |

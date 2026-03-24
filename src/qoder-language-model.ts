@@ -12,6 +12,7 @@ import type {
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 
 import {
   configure,
@@ -206,6 +207,11 @@ function normalizeToolInputObject(toolName: string, input: unknown): unknown {
       return next
     }
 
+    case 'skill':
+      return renameKeys(input, {
+        skill: 'name',
+      })
+
     default:
       return input
   }
@@ -249,6 +255,7 @@ function buildQoderQueryOptions(
   permissionMode: 'bypassPermissions'
   includePartialMessages: true
   maxBufferSize: number
+  sessionId: string
   cwd: string
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
@@ -270,6 +277,7 @@ function buildQoderQueryOptions(
     permissionMode: 'bypassPermissions',
     includePartialMessages: true,
     maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
+    sessionId: randomUUID(),
     cwd: process.cwd(),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),

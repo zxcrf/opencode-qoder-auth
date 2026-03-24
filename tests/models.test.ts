@@ -3,7 +3,7 @@ import { QODER_MODELS, getModelById, DEFAULT_MODEL_ID } from '../src/models.js'
 
 describe('Qoder 模型定义', () => {
   it('QODER_MODELS 包含所有可用模型', () => {
-    const expectedKeys = ['auto', 'efficient', 'performance', 'ultimate', 'lite', 'qmodel', 'q35model', 'gmodel', 'kmodel', 'mmodel']
+    const expectedKeys = ['auto', 'efficient', 'performance', 'ultimate', 'lite', 'q35model_preview', 'qmodel', 'q35model', 'gmodel', 'kmodel', 'mmodel']
     for (const key of expectedKeys) {
       expect(QODER_MODELS[key], `缺少模型: ${key}`).toBeDefined()
     }
