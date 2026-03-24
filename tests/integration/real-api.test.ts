@@ -10,12 +10,14 @@
 import { describe, it, expect } from 'vitest'
 import { QoderLanguageModel } from '../../src/qoder-language-model.js'
 import { setMcpBridgeServers } from '../../src/mcp-bridge.js'
+import { requireQoderAuth } from './helpers.js'
 
 // 设置较长超时，真实 API 调用可能需要 30s+
 const TIMEOUT = 60_000
 
 describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
   it('should respond to a simple text prompt with lite model', async () => {
+    requireQoderAuth()
     const model = new QoderLanguageModel('lite')
 
     const result = await model.doGenerate({
@@ -49,6 +51,7 @@ describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
   })
 
   it('should stream text delta events', async () => {
+    requireQoderAuth()
     const model = new QoderLanguageModel('lite')
 
     const { stream } = await model.doStream({
@@ -90,6 +93,7 @@ describe.skip('Qoder Real API Integration', { timeout: TIMEOUT }, () => {
   })
 
   it('should handle multimodal image input (auto model)', async () => {
+    requireQoderAuth()
     // 1x1 红色像素 PNG (base64, RGB=255,0,0, 有效 checksum)
     const RED_1x1_PNG =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
@@ -261,6 +265,7 @@ describe('Qoder Reasoning Streaming', { timeout: TIMEOUT }, () => {
 
 describe.skip('context7 MCP tool call debug', { timeout: TIMEOUT }, () => {
   it('观察 CLI 在有 mcpServers=context7 时发出的工具名格式', async () => {
+    requireQoderAuth()
     setMcpBridgeServers({
       context7: {
         command: 'npx',
@@ -311,6 +316,7 @@ describe.skip('context7 MCP tool call debug', { timeout: TIMEOUT }, () => {
   })
 
   it('观察不传 mcpServers 时 CLI 是否还会尝试调用 context7', async () => {
+    requireQoderAuth()
     // 清空 mcp-bridge（不传任何 MCP server）
     setMcpBridgeServers({})
 

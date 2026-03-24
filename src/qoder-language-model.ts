@@ -106,6 +106,8 @@ function resolveQoderCLI(): string | undefined {
 function normalizeToolName(name: string): string {
   const lower = name.toLowerCase()
   if (lower === 'askuserquestion') return 'question'
+  if (lower === 'agent') return 'task'
+  if (lower === 'exitplanmode') return 'plan_exit'
   // CLI MCP proxy 格式：mcp__{serverName}__{toolName} → {serverName}_{toolName}
   if (lower.startsWith('mcp__')) {
     const withoutPrefix = lower.slice(5) // 去掉 'mcp__'
@@ -120,6 +122,107 @@ function normalizeToolName(name: string): string {
     return withoutPrefix
   }
   return lower
+}
+
+function normalizeToolInput(toolName: string, input: string): string {
+  let parsed: unknown
+  try {
+    parsed = input.trim() ? JSON.parse(input) : {}
+  } catch {
+    return input
+  }
+
+  const normalized = normalizeToolInputObject(toolName, parsed)
+  return JSON.stringify(normalized)
+}
+
+function normalizeToolInputObject(toolName: string, input: unknown): unknown {
+  if (!isRecord(input)) return input
+
+  switch (toolName) {
+    case 'read':
+      return renameKeys(input, {
+        file_path: 'filePath',
+      })
+
+    case 'write':
+      return renameKeys(input, {
+        file_path: 'filePath',
+      })
+
+    case 'edit':
+      return renameKeys(input, {
+        file_path: 'filePath',
+        old_string: 'oldString',
+        new_string: 'newString',
+        replace_all: 'replaceAll',
+      })
+
+    case 'grep': {
+      const next = renameKeys(input, {})
+      if (!pickString(next.include)) {
+        next.include = pickString(next.glob) ?? inferIncludeFromType(next.type)
+      }
+      delete next.glob
+      delete next.type
+      delete next.output_mode
+      delete next.multiline
+      delete next['-i']
+      delete next['-n']
+      delete next['-B']
+      delete next['-A']
+      delete next['-C']
+      delete next.head_limit
+      return next
+    }
+
+    case 'question': {
+      const next = renameKeys(input, {})
+      if (Array.isArray(next.questions)) {
+        next.questions = next.questions.map((question) => {
+          if (!isRecord(question)) return question
+          const mapped = renameKeys(question, {
+            multiSelect: 'multiple',
+          })
+          delete mapped.answers
+          return mapped
+        })
+      }
+      delete next.answers
+      return next
+    }
+
+    case 'todowrite': {
+      const next = renameKeys(input, {})
+      if (Array.isArray(next.todos)) {
+        next.todos = next.todos.map((todo) => {
+          if (!isRecord(todo)) return todo
+          const mapped = renameKeys(todo, {})
+          mapped.priority = pickString(mapped.priority) ?? 'medium'
+          delete mapped.activeForm
+          return mapped
+        })
+      }
+      return next
+    }
+
+    default:
+      return input
+  }
+}
+
+function renameKeys(
+  input: Record<string, unknown>,
+  keyMap: Record<string, string>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input).map(([key, value]) => [keyMap[key] ?? key, value]),
+  )
+}
+
+function inferIncludeFromType(type: unknown): string | undefined {
+  const ext = pickString(type)
+  return ext ? `*.${ext}` : undefined
 }
 
 
@@ -416,14 +519,16 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
                 if (toolBlock) {
                   if (!toolBlock.isProviderExecuted) {
+                    const normalizedInput = normalizeToolInput(toolBlock.name, toolBlock.input)
                     controller.enqueue({ type: 'tool-input-end', id: toolBlock.id } as LanguageModelV2StreamPart)
                     controller.enqueue({
                       type: 'tool-call',
                       toolCallId: toolBlock.id,
                       toolName: toolBlock.name,
-                      input: toolBlock.input,
+                      input: normalizedInput,
                     } as LanguageModelV2StreamPart)
                     emittedFunctionToolCall = true
+                    toolBlock.input = normalizedInput
                   }
                   pendingToolCalls.set(toolBlock.id, {
                     toolName: toolBlock.name,
@@ -463,7 +568,8 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   const isProviderExecuted = hasTools && !functionToolNames.has(toolName)
                   pendingToolCalls.set(block.id, { toolName, input: '', isProviderExecuted })
                   if (!isProviderExecuted) {
-                    const inputJson = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {})
+                    const rawInputJson = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {})
+                    const inputJson = normalizeToolInput(toolName, rawInputJson)
                     controller.enqueue({
                       type: 'tool-input-start',
                       id: block.id,

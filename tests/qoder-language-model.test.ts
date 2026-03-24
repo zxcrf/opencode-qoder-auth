@@ -961,6 +961,199 @@ describe('QoderLanguageModel', () => {
       expect((toolCall as any).input).toBe('{"command":"pwd"}')
     })
 
+    it('Read 工具参数从 file_path 映射为 filePath', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_map_read', name: 'Read', input: { file_path: '/tmp/a.txt', offset: 1, limit: 10 } },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'read', description: 'Read file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(JSON.parse((toolCall as any).input)).toEqual({ filePath: '/tmp/a.txt', offset: 1, limit: 10 })
+    })
+
+    it('Edit 工具参数从 snake_case 映射为 camelCase', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_map_edit',
+              name: 'Edit',
+              input: {
+                file_path: '/tmp/a.txt',
+                old_string: 'a',
+                new_string: 'b',
+                replace_all: true,
+              },
+            },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'edit', description: 'Edit file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(JSON.parse((toolCall as any).input)).toEqual({
+        filePath: '/tmp/a.txt',
+        oldString: 'a',
+        newString: 'b',
+        replaceAll: true,
+      })
+    })
+
+    it('Question 工具参数从 multiSelect 映射为 multiple', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_map_question',
+              name: 'AskUserQuestion',
+              input: {
+                questions: [
+                  {
+                    question: 'Q?',
+                    header: 'Q',
+                    multiSelect: true,
+                    options: [{ label: 'A', description: 'a' }],
+                  },
+                ],
+                answers: { Q: 'A' },
+              },
+            },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'question', description: 'Ask question', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(JSON.parse((toolCall as any).input)).toEqual({
+        questions: [
+          {
+            question: 'Q?',
+            header: 'Q',
+            multiple: true,
+            options: [{ label: 'A', description: 'a' }],
+          },
+        ],
+      })
+    })
+
+    it('TodoWrite 自动补 priority 并移除 activeForm', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_map_todo',
+              name: 'TodoWrite',
+              input: {
+                todos: [
+                  { content: 'Task A', status: 'pending', activeForm: 'Doing task A' },
+                ],
+              },
+            },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'todowrite', description: 'Write todos', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(JSON.parse((toolCall as any).input)).toEqual({
+        todos: [{ content: 'Task A', status: 'pending', priority: 'medium' }],
+      })
+    })
+
+    it('Agent 映射为 task，ExitPlanMode 映射为 plan_exit', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_map_task', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'explorer' } },
+            { type: 'tool_use', id: 'call_map_plan', name: 'ExitPlanMode', input: {} },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'plan_exit', description: 'Exit plan', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect((toolCalls[0] as any).toolName).toBe('task')
+      expect((toolCalls[1] as any).toolName).toBe('plan_exit')
+    })
+
     // ── finishReason：有 tool-call 时应为 'tool-calls' ─────────────────────
 
     it('有 function tool-call 时 finishReason 为 tool-calls', async () => {
