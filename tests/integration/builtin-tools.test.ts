@@ -23,9 +23,14 @@ type ProbeResult = {
   matched: boolean
 }
 
-function runUntil(prompt: string, matcher: (stdout: string, stderr: string) => boolean, timeoutMs = TIMEOUT): Promise<ProbeResult> {
+function runUntil(
+  prompt: string,
+  matcher: (stdout: string, stderr: string) => boolean,
+  timeoutMs = TIMEOUT,
+  model = MODEL,
+): Promise<ProbeResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(OPENCODE_BIN, ['run', '-m', MODEL, '--print-logs', prompt], {
+    const child = spawn(OPENCODE_BIN, ['run', '-m', model, '--print-logs', prompt], {
       cwd: PROJECT_DIR,
       env: { ...process.env, HOME: os.homedir(), OPENCODE_NON_INTERACTIVE: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,6 +90,20 @@ afterAll(() => {
 })
 
 describe('Qoder CLI 内置工具验证（单工具快速模式）', { concurrent: false }, () => {
+  it('mmodel + Grep 不应重复循环调用', async () => {
+    requireQoderAuth()
+    const result = await runUntil(
+      'Use the Grep tool to search for QoderLanguageModel in the current project src directory, then only return the matching file path.',
+      (_stdout, stderr) => stderr.includes('exiting loop'),
+      120_000,
+      'qoder/mmodel',
+    )
+
+    const loopCount = (result.stderr.match(/service=session\.prompt step=\d+ .* loop/g) ?? []).length
+    expect(loopCount).toBeLessThanOrEqual(2)
+    expect(result.stdout).toContain('src/qoder-language-model.ts')
+  }, 120_000)
+
   it('Bash', async () => {
     requireQoderAuth()
     const result = await runUntil(

@@ -187,6 +187,15 @@ describe('QoderLanguageModel', () => {
       expect(lastQueryParams.prompt).toContain('hello world')
     })
 
+    it('query() 默认提升 maxBufferSize 到 8MB', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('buffer test'))).stream)
+
+      expect(lastQueryParams?.options?.maxBufferSize).toBe(8 * 1024 * 1024)
+    })
+
     it('非 text_delta 的 stream_event 被忽略', async () => {
       // content_block_start 不是文本 delta，应忽略
       mockMessages.push({
@@ -1192,6 +1201,71 @@ describe('QoderLanguageModel', () => {
       const finish = parts.find((p) => p.type === 'finish')
       expect(finish).toBeDefined()
       expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('同一 query 内工具已执行完成且最终 stop_reason=end_turn 时 finishReason 为 stop', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_finish_done_001', name: 'grep' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"pattern":"QoderLanguageModel"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_finish_done_001', content: 'Found 1 file:\n\nsrc/qoder-language-model.ts' },
+          ],
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'text', text: '' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'src/qoder-language-model.ts' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 1 },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 10, output_tokens: 5 } },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'grep', description: 'Search text', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('stop')
     })
 
     it('只有 providerExecuted tool-call 时 finishReason 仍为 stop', async () => {

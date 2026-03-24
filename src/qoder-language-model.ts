@@ -237,6 +237,8 @@ type QoderProviderOptions = {
   mcpServers?: Record<string, unknown>
 }
 
+const DEFAULT_QODER_MAX_BUFFER_SIZE = 8 * 1024 * 1024
+
 function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
   modelId: string,
@@ -246,6 +248,7 @@ function buildQoderQueryOptions(
   allowDangerouslySkipPermissions: true
   permissionMode: 'bypassPermissions'
   includePartialMessages: true
+  maxBufferSize: number
   cwd: string
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
@@ -266,6 +269,7 @@ function buildQoderQueryOptions(
     allowDangerouslySkipPermissions: true,
     permissionMode: 'bypassPermissions',
     includePartialMessages: true,
+    maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
     cwd: process.cwd(),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
@@ -448,6 +452,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
         // 是否向 opencode 发出了 function tool-call（决定 finishReason）
         let emittedFunctionToolCall = false
 
+        // 最近一次 assistant message 的 stop_reason（来自 stream_event.message_delta）
+        // 典型值：tool_use / end_turn
+        let lastAssistantStopReason: string | undefined
+
         try {
           // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
           const qoderQuery = query({ prompt, options: qoderOptions })
@@ -543,6 +551,8 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   controller.enqueue({ type: 'text-end', id: String(idx) })
                   activeStreamTextBlocks.delete(idx)
                 }
+              } else if (ev.type === 'message_delta' && isRecord(ev.delta) && typeof ev.delta.stop_reason === 'string') {
+                lastAssistantStopReason = ev.delta.stop_reason
               }
 
             // ── assistant：完整消息块（CLI 不支持流式时走此路径） ──────────
@@ -612,8 +622,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
             // ── result：会话结束 ────────────────────────────────────────
             } else if (m.type === 'result') {
-              // 清理残留 pending 工具调用
-              pendingToolCalls.clear()
+              const outstandingToolCallCount = pendingToolCalls.size
 
               // 关闭所有未关闭的文本块和推理块
               for (const idx of activeStreamReasoningBlocks) {
@@ -645,9 +654,16 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 })
               } else {
                 const usage = m.usage as { input_tokens: number; output_tokens: number } | undefined
+                const hasOutstandingFunctionToolCalls = emittedFunctionToolCall && outstandingToolCallCount > 0
+                const mappedFinishReason: LanguageModelV2FinishReason =
+                  lastAssistantStopReason === 'end_turn'
+                    ? 'stop'
+                    : hasOutstandingFunctionToolCalls || lastAssistantStopReason === 'tool_use'
+                      ? 'tool-calls'
+                      : 'stop'
                 controller.enqueue({
                   type: 'finish',
-                  finishReason: emittedFunctionToolCall ? 'tool-calls' : 'stop',
+                  finishReason: mappedFinishReason,
                   usage: {
                     inputTokens: usage?.input_tokens ?? 0,
                     outputTokens: usage?.output_tokens ?? 0,
@@ -655,6 +671,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   },
                 })
               }
+
+              // 清理残留 pending 工具调用
+              pendingToolCalls.clear()
               hasFinish = true
               break  // result 是终止消息，退出迭代
             }
