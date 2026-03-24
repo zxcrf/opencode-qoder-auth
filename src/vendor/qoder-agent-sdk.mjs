@@ -5,6 +5,10 @@ import { spawn, execFile } from 'child_process';
 import { createInterface } from 'readline';
 import * as net from 'net';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
+
+var __filename = fileURLToPath(import.meta.url);
+var __dirname = path2.dirname(__filename);
 
 // package.json
 var package_default = {
@@ -1808,7 +1812,9 @@ function query(params) {
         yield message;
       }
     } finally {
-      await queryHandler.close();
+      if (queryHandler) {
+        await queryHandler.close();
+      }
     }
   }
   const generator = createGenerator();
