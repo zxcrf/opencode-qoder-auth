@@ -75,8 +75,8 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   q35model_preview: {
     id: 'q35model_preview',
-    name: 'Pitaya-03-20',
-    attachment: false,
+    name: 'Qwen3.6-plus-preview (0x)',
+    attachment: true,
     reasoning: false,
     temperature: false,
     tool_call: true,

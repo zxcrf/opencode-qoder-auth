@@ -22,17 +22,56 @@ import {
 import { buildPromptFromOptions } from './prompt-builder.js'
 import { getMcpBridgeServers } from './mcp-bridge.js'
 
-// ── storageDir 解析 — 优先 ~/.qoderwork（QoderWork 登录），回退 ~/.qoder ───────
+// ── storageDir 解析 — 与 qodercli 行为对齐 ──────────────────────────────────
+// qodercli login 写入 ~/.qoder；QoderWork.app 写入 ~/.qoderwork。
+// 优先取最近更新的 auth/user 文件所在目录，保证 SDK 和 CLI 使用同一份 token。
 function resolveStorageDir(): string {
-  const qoderwork = path.join(os.homedir(), '.qoderwork')
-  if (fs.existsSync(path.join(qoderwork, '.auth', 'user'))) return qoderwork
-  return path.join(os.homedir(), '.qoder')
+  const candidates = [
+    path.join(os.homedir(), '.qoder'),
+    path.join(os.homedir(), '.qoderwork'),
+  ]
+  let best: string | undefined
+  let bestMtime = 0
+  for (const dir of candidates) {
+    const userFile = path.join(dir, '.auth', 'user')
+    try {
+      const stat = fs.statSync(userFile)
+      if (stat.mtimeMs > bestMtime) {
+        bestMtime = stat.mtimeMs
+        best = dir
+      }
+    } catch { /* file doesn't exist */ }
+  }
+  return best ?? path.join(os.homedir(), '.qoder')
 }
 
 // ── SDK 全局配置 — 不设 integrationMode（设置后服务端会按订阅类型鉴权） ──────
 configure({
   storageDir: resolveStorageDir(),
 })
+
+// ── 调试日志 — 保存原始 stderr 引用，不受 SDK log filter 影响 ────────────────
+const _rawStderr = process.stderr.write.bind(process.stderr)
+function debugLog(msg: string): void {
+  if (process.env.QODER_DEBUG === '1') {
+    _rawStderr(`[QODER_DEBUG] ${msg}\n`)
+  }
+}
+
+function decorateFinishReason(reason: LanguageModelV2FinishReason): LanguageModelV2FinishReason {
+  if (process.env.OPENCODE !== '1') return reason
+
+  // opencode 1.3.7 的本地 file:// provider 集成链路里，某处会把 finishReason 当作带 unified 字段的对象读取；
+  // 直接传原始字符串会导致最终落库时 step-finish.reason 为空并触发 prompt loop 死循环。
+  // 这里用 String 对象包装，既保留字符串语义（JSON/stringify 后仍是 "stop"），又补齐 .unified 字段兼容该链路。
+  const wrapped = new String(reason) as String & {
+    unified?: LanguageModelV2FinishReason
+    raw?: string | undefined
+  }
+  wrapped.unified = reason
+  wrapped.raw = undefined
+  return wrapped as unknown as LanguageModelV2FinishReason
+}
 
 /**
  * 过滤 @ali/qoder-agent-sdk 打到 console 的 [SDK] 系列日志，避免污染 opencode 界面。
@@ -248,12 +287,17 @@ type QoderProviderOptions = {
   experimentalMcpLoad?: boolean
 }
 
+type QoderProviderFactoryOptions = QoderProviderOptions & {
+  name?: string
+}
+
 const DEFAULT_QODER_MAX_BUFFER_SIZE = 8 * 1024 * 1024
 
 function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
   modelId: string,
   cliPath?: string,
+  defaultProviderOptions?: QoderProviderOptions,
 ): {
   model: string
   allowDangerouslySkipPermissions: true
@@ -262,16 +306,21 @@ function buildQoderQueryOptions(
   maxBufferSize: number
   sessionId: string
   cwd: string
+  env: Record<string, string>
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
   extraArgs?: Record<string, string | null>
 } {
-  const providerOptions = getQoderProviderOptions(options.providerOptions)
+  const providerOptions = {
+    ...(defaultProviderOptions ?? {}),
+    ...(getQoderProviderOptions(options.providerOptions) ?? {}),
+  }
 
   // 双轨 MCP 策略：CLI 和 opencode 各自独立连接 MCP servers
   // CLI 通过 mcp__{server}__{tool} 格式调用，opencode 通过 {server}_{tool} 格式调用
   // 不过滤 opencode 已管理的 servers — CLI 需要自主使用外部 MCP 工具完成 agent loop
   const mcpServers = {
+    ...extractMcpServersFromProviderOptions(defaultProviderOptions?.mcpServers),  // provider factory 默认桥接（跨模块上下文稳定）
     ...getMcpBridgeServers(),                                                  // config.mcp 桥接（全量传递，不过滤）
     ...extractMcpServersFromProviderOptions(providerOptions?.mcpServers),      // providerOptions 覆盖（高优先级）
     ...extractMcpServersFromTools(options.tools),                              // provider-defined tools（最高优先级）
@@ -294,10 +343,20 @@ function buildQoderQueryOptions(
     maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
     sessionId: randomUUID(),
     cwd: process.cwd(),
+    env: buildQoderQueryEnv(),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
     ...(hasExtraArgs ? { extraArgs: baseExtraArgs } : {}),
   }
+}
+
+function buildQoderQueryEnv(): Record<string, string> {
+  const env = { ...process.env }
+  delete env.OPENCODE
+  delete env.OPENCODE_PID
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  )
 }
 
 function getQoderProviderOptions(
@@ -358,14 +417,14 @@ function normalizeMcpServerConfig(config: unknown): QoderMcpServerConfig | null 
     if (config.command.length === 0) return null
     const [command, ...args] = config.command as string[]
     const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
-    return { command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
+    return { type: 'stdio', command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
   }
 
   if (typeof config.command === 'string') {
     const args = pickStringArray(config.args)
     const env = pickStringRecord(config.environment) ?? pickStringRecord(config.env)
     return {
-      ...(config.type === 'stdio' ? { type: 'stdio' as const } : {}),
+      type: 'stdio',
       command: config.command,
       ...(args && args.length > 0 ? { args } : {}),
       ...(env ? { env } : {}),
@@ -395,7 +454,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
   readonly provider = 'qoder'
   readonly supportedUrls: Record<string, RegExp[]> = {}
 
-  constructor(public readonly modelId: string) {}
+  constructor(
+    public readonly modelId: string,
+    private readonly providerOptions?: QoderProviderOptions,
+  ) {}
 
   async doGenerate(options: LanguageModelV2CallOptions) {
     const { stream } = await this.doStream(options)
@@ -440,7 +502,11 @@ export class QoderLanguageModel implements LanguageModelV2 {
   }> {
     const prompt = buildPromptFromOptions(options)
     const cliPath = resolveQoderCLI()
-    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath)
+    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath, this.providerOptions)
+
+    debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}`)
+    debugLog(`doStream() prompt length=${typeof prompt === 'string' ? prompt.length : 'non-string'}`)
+    debugLog(`doStream() qoderOptions.mcpServers=[${Object.keys(qoderOptions.mcpServers ?? {}).join(',')}]`)
 
     // opencode function 工具名集合（由 opencode 管理并执行，如 bash、read、context7_resolve-library-id 等）
     // 这些工具调用不带 providerExecuted，让 opencode 负责执行
@@ -453,9 +519,40 @@ export class QoderLanguageModel implements LanguageModelV2 {
         .filter((t) => t.type === 'function')
         .map((t) => normalizeToolName(t.name))
     )
+    debugLog(`doStream() hasTools=${hasTools}, functionToolNames=[${[...functionToolNames].join(',')}]`)
+
+    // 每次 query 独立的 AbortController，用于中断后台 qodercli 进程
+    const abortController = new AbortController()
+
+    // 幂等清理函数：abort + 结束 query 异步生成器，避免重复调用抛错
+    let cleanupCalled = false
+    let qoderQueryRef: AsyncGenerator<unknown, void, undefined> | null = null
+    function cleanup() {
+      if (cleanupCalled) return
+      cleanupCalled = true
+      abortController.abort()
+      // return() 通知生成器提前结束，触发 SDK/qodercli 清理路径
+      void qoderQueryRef?.return(undefined).catch(() => { /* ignore */ })
+    }
+
+    // 监听外部 abortSignal：opencode 中断时立即触发清理
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) {
+        cleanup()
+      } else {
+        options.abortSignal.addEventListener('abort', cleanup, { once: true })
+      }
+    }
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
+      cancel() {
+        // ReadableStream 被取消（reader.cancel() 或 reader 提前释放）时触发清理
+        cleanup()
+      },
       start: async (controller) => {
+        // ── stream-start：AI SDK v2 协议要求在任何内容前显式发出 ──────────
+        controller.enqueue({ type: 'stream-start', warnings: [] })
+
         // ── text block 状态管理 ──────────────────────────────────────────
         let textBlockCounter = 0
         let hasFinish = false
@@ -482,9 +579,18 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
         try {
           // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
-          const qoderQuery = query({ prompt, options: qoderOptions })
+          const qoderQuery = query({ prompt, options: { ...qoderOptions, abortController } })
+          qoderQueryRef = qoderQuery
+          let sdkMsgCount = 0
           for await (const msg of qoderQuery) {
+            sdkMsgCount++
             const m = msg as Record<string, unknown>
+            debugLog(`SDK msg #${sdkMsgCount}: type=${m.type}${m.subtype ? ` subtype=${m.subtype}` : ''}`)
+            if (m.type === 'system' && m.subtype === 'init') {
+              const tools = Array.isArray(m.tools) ? m.tools.join(',') : ''
+              const mcpServers = Array.isArray(m.mcp_servers) ? JSON.stringify(m.mcp_servers) : '[]'
+              debugLog(`SDK init: tools=[${tools}] mcp_servers=${mcpServers}`)
+            }
 
             // ── stream_event：增量文本 / 增量工具输入（流式 CLI 支持时） ──
             if (m.type === 'stream_event') {
@@ -499,6 +605,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   const toolName = normalizeToolName(block.name)
                   // normalizeToolName 统一处理：大小写 + AskUserQuestion→question + mcp__server__tool→server_tool
                   const isProviderExecuted = hasTools && !functionToolNames.has(toolName)
+                  debugLog(`tool_use block_start: raw=${block.name} → normalized=${toolName}, inFunctionTools=${functionToolNames.has(toolName)}, isProviderExecuted=${isProviderExecuted}`)
                   streamToolBlocks.set(idx, { id: block.id, name: toolName, input: '', isProviderExecuted })
                   if (!isProviderExecuted) {
                     controller.enqueue({
@@ -560,6 +667,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                       input: normalizedInput,
                     } as LanguageModelV2StreamPart)
                     emittedFunctionToolCall = true
+                    debugLog(`emitted tool-call to opencode: toolName=${toolBlock.name}, id=${toolBlock.id}`)
                     toolBlock.input = normalizedInput
                   }
                   pendingToolCalls.set(toolBlock.id, {
@@ -577,6 +685,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 }
               } else if (ev.type === 'message_delta' && isRecord(ev.delta) && typeof ev.delta.stop_reason === 'string') {
                 lastAssistantStopReason = ev.delta.stop_reason
+                debugLog(`message_delta: stop_reason=${ev.delta.stop_reason}`)
               }
 
             // ── assistant：完整消息块（CLI 不支持流式时走此路径） ──────────
@@ -637,6 +746,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
 
                 const toolCall = pendingToolCalls.get(block.tool_use_id)
+                debugLog(`tool_result: tool_use_id=${block.tool_use_id}, found=${!!toolCall}, toolName=${toolCall?.toolName}, isProviderExecuted=${toolCall?.isProviderExecuted}`)
                 if (!toolCall) continue
 
                 // CLI 内置工具（isProviderExecuted=true）的结果不转发给 opencode
@@ -647,6 +757,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
             // ── result：会话结束 ────────────────────────────────────────
             } else if (m.type === 'result') {
               const outstandingToolCallCount = pendingToolCalls.size
+              debugLog(`result: subtype=${m.subtype}, is_error=${m.is_error}, pendingToolCalls=${outstandingToolCallCount}, emittedFunctionToolCall=${emittedFunctionToolCall}, lastStopReason=${lastAssistantStopReason}`)
+              if (outstandingToolCallCount > 0) {
+                debugLog(`result: outstanding tools: ${[...pendingToolCalls.entries()].map(([id, t]) => `${t.toolName}(${id},prov=${t.isProviderExecuted})`).join(', ')}`)
+              }
 
               // 关闭所有未关闭的文本块和推理块
               for (const idx of activeStreamReasoningBlocks) {
@@ -673,21 +787,21 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 })
                 controller.enqueue({
                   type: 'finish',
-                  finishReason: 'error',
+                  finishReason: decorateFinishReason('error'),
                   usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
                 })
               } else {
                 const usage = m.usage as { input_tokens: number; output_tokens: number } | undefined
+                // 只有确实仍有待处理的 function tool call 时才返回 tool-calls。
+                // 若 stop_reason=tool_use 但同一 query 内 tool_result 已到达、pendingToolCalls 已清空，
+                // 则应返回 stop，避免 opencode 误判为还需要继续执行而陷入无限循环。
                 const hasOutstandingFunctionToolCalls = emittedFunctionToolCall && outstandingToolCallCount > 0
                 const mappedFinishReason: LanguageModelV2FinishReason =
-                  lastAssistantStopReason === 'end_turn'
-                    ? 'stop'
-                    : hasOutstandingFunctionToolCalls || lastAssistantStopReason === 'tool_use'
-                      ? 'tool-calls'
-                      : 'stop'
+                  hasOutstandingFunctionToolCalls ? 'tool-calls' : 'stop'
+                debugLog(`finish: mappedFinishReason=${mappedFinishReason} (emittedFunctionToolCall=${emittedFunctionToolCall}, outstandingToolCallCount=${outstandingToolCallCount})`)
                 controller.enqueue({
                   type: 'finish',
-                  finishReason: mappedFinishReason,
+                  finishReason: decorateFinishReason(mappedFinishReason),
                   usage: {
                     inputTokens: usage?.input_tokens ?? 0,
                     outputTokens: usage?.output_tokens ?? 0,
@@ -705,14 +819,27 @@ export class QoderLanguageModel implements LanguageModelV2 {
           }
 
           if (!hasFinish) {
+            debugLog('stream ended without result message, emitting fallback finish=stop')
             controller.enqueue({
               type: 'finish',
-              finishReason: 'stop',
+              finishReason: decorateFinishReason('stop'),
               usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
             })
           }
+          debugLog('stream complete, closing controller')
+          cleanup()
           controller.close()
         } catch (err) {
+          // 记录 catch 进入时，abort 是否已由外部（abortSignal / cancel）提前触发
+          const wasExternallyAborted = cleanupCalled
+          cleanup()
+          // 外部 abort/cancel 触发的中断：静默关闭，不 enqueue error/finish（避免混乱）
+          if (wasExternallyAborted) {
+            if (!hasFinish) {
+              controller.close()
+            }
+            return
+          }
           if (!hasFinish) {
             controller.enqueue({
               type: 'error',
@@ -720,7 +847,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
             })
             controller.enqueue({
               type: 'finish',
-              finishReason: 'error',
+              finishReason: decorateFinishReason('error'),
               usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
             })
           }
@@ -768,9 +895,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // ── Provider factory ──────────────────────────────────────────────────────────
 
-export function createQoderProvider(): ProviderV2 {
+export function createQoderProvider(options?: QoderProviderFactoryOptions): ProviderV2 {
+  const providerOptions: QoderProviderOptions = {
+    ...(isRecord(options?.mcpServers) ? { mcpServers: options?.mcpServers } : {}),
+    ...(isRecord(options?.extraArgs) ? { extraArgs: pickNullableStringRecord(options?.extraArgs) } : {}),
+    ...(options?.experimentalMcpLoad === true ? { experimentalMcpLoad: true } : {}),
+  }
+
   return {
-    languageModel: (modelId: string) => new QoderLanguageModel(modelId),
+    languageModel: (modelId: string) => new QoderLanguageModel(modelId, providerOptions),
     textEmbeddingModel: (_modelId: string) => {
       throw new Error('Qoder provider does not support text embeddings')
     },

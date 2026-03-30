@@ -6,6 +6,7 @@
       "name": "opencode-qoder-plugin",
       "dependencies": {
         "@ai-sdk/provider": "^3.0.8",
+        "@ali/qoder-agent-sdk": "^0.0.45",
         "@opencode-ai/plugin": "^1.2.27",
         "zod": "^3.22.4",
       },
@@ -17,6 +18,8 @@
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "https://registry.anpm.alibaba-inc.com/@ai-sdk/provider/-/provider-3.0.8.tgz", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
+
+    "@ali/qoder-agent-sdk": ["@ali/qoder-agent-sdk@0.0.45", "https://registry.anpm.alibaba-inc.com/@ali/qoder-agent-sdk/-/qoder-agent-sdk-0.0.45.tgz", { "dependencies": { "zod": "^3.22.4" }, "peerDependencies": { "@modelcontextprotocol/sdk": ">=1.0.0" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-/1dvN+JV9jI0B+i9HsKXGPZkE4LlVtXdPC+HRCznEWgF9Ia0PqLv0lGps6SvmkeC2+/SLfb7Vo0oMq33ZNdCew=="],
 
     "@emnapi/core": ["@emnapi/core@1.9.1", "https://registry.anpm.alibaba-inc.com/@emnapi/core/-/core-1.9.1.tgz", { "dependencies": { "@emnapi/wasi-threads": "1.2.0", "tslib": "^2.4.0" } }, "sha512-mukuNALVsoix/w1BJwFzwXBN/dHeejQtuVzcDsfOEsdpCumXb/E9j8w11h5S54tT1xhifGfbbSm/ICrObRb3KA=="],
 
@@ -31,6 +34,8 @@
     "@opencode-ai/plugin": ["@opencode-ai/plugin@1.2.27", "https://registry.anpm.alibaba-inc.com/@opencode-ai/plugin/-/plugin-1.2.27.tgz", { "dependencies": { "@opencode-ai/sdk": "1.2.27", "zod": "4.1.8" } }, "sha512-h+8Bw9v9nghMg7T+SUCTzxlIhOrsTqXW7U0HVLGQST5DjbN7uyCUM51roZWZ8LRjGxzbzFhvPnY1bj8i+ioZyw=="],
 
     "@opencode-ai/sdk": ["@opencode-ai/sdk@1.2.27", "https://registry.anpm.alibaba-inc.com/@opencode-ai/sdk/-/sdk-1.2.27.tgz", {}, "sha512-Wk0o/I+Fo+wE3zgvlJDs8Fb67KlKqX0PrV8dK5adSDkANq6r4Z25zXJg2iOir+a8ntg3rAcpel1OY4FV/TwRUA=="],
+
+    "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "https://registry.anpm.alibaba-inc.com/@opentelemetry/api/-/api-1.9.0.tgz", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.120.0", "https://registry.anpm.alibaba-inc.com/@oxc-project/types/-/types-0.120.0.tgz", {}, "sha512-k1YNu55DuvAip/MGE1FTsIuU3FUCn6v/ujG9V7Nq5Df/kX2CWb13hhwD0lmJGMGqE+bE1MXvv9SZVnMzEXlWcg=="],
 

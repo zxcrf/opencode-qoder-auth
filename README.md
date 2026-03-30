@@ -65,7 +65,7 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
-| `q35model_preview` | Pitaya-03-20 | 180K | 32K | ✗ | ✗ |
+| `q35model_preview` | Qwen3.6-plus-preview (0x) | 180K | 32K | ✓ | ✗ |
 | `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
 | `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
 | `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
@@ -168,7 +168,7 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
-| `q35model_preview` | Pitaya-03-20 | 180K | 32K | ✗ | ✗ |
+| `q35model_preview` | Qwen3.6-plus-preview (0x) | 180K | 32K | ✓ | ✗ |
 | `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
 | `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
 | `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |

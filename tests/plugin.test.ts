@@ -91,8 +91,13 @@ describe('QoderProviderPlugin', () => {
       const servers = getMcpBridgeServers()
       expect(servers).toBeDefined()
       expect(servers['context7']).toBeDefined()
+      expect(servers['context7'].type).toBe('stdio')
       expect(servers['context7'].command).toBe('npx')
       expect(servers['context7'].args).toEqual(['-y', '@upstash/context7-mcp@latest'])
+
+      const qoderProvider = config.provider!['qoder'] as any
+      expect(qoderProvider.options?.mcpServers?.context7?.type).toBe('stdio')
+      expect(qoderProvider.options?.mcpServers?.context7?.command).toBe('npx')
     })
 
     it('从 config.mcp 提取 remote 类型 MCP 服务器', async () => {

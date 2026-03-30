@@ -40,11 +40,24 @@ export const QoderProviderPlugin: Plugin = async () => {
       const bridgedMcp = convertOpencodeMcp(config.mcp)
       setMcpBridgeServers(bridgedMcp)
 
+      const mergedProviderOptions = {
+        ...(existing.options ?? {}),
+        ...(Object.keys(bridgedMcp).length > 0
+          ? {
+              mcpServers: {
+                ...(((existing.options as Record<string, unknown> | undefined)?.mcpServers as Record<string, unknown> | undefined) ?? {}),
+                ...bridgedMcp,
+              },
+            }
+          : {}),
+      }
+
       config.provider.qoder = {
         ...existing,
         // opencode 用 npm 字段来加载 SDK：file:// 开头则直接 import，否则 BunProc.install()
         npm: existing.npm ?? providerFileUrl,
         name: existing.name ?? 'Qoder',
+        options: mergedProviderOptions,
         models: mergedModels,
       }
     },
@@ -122,12 +135,13 @@ function convertOneMcpEntry(raw: unknown): QoderMcpServerConfig | null {
     if (cfg.command.length === 0) return null
     const [command, ...args] = cfg.command as string[]
     const env = pickStringRecord(cfg.environment) ?? pickStringRecord(cfg.env)
-    return { command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
+    return { type: 'stdio', command, ...(args.length > 0 ? { args } : {}), ...(env ? { env } : {}) }
   }
   if (typeof cfg.command === 'string') {
     const args = pickStringArray(cfg.args)
     const env = pickStringRecord(cfg.environment) ?? pickStringRecord(cfg.env)
     return {
+      type: 'stdio',
       command: cfg.command,
       ...(args && args.length > 0 ? { args } : {}),
       ...(env ? { env } : {}),

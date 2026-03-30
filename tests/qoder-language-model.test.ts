@@ -44,6 +44,7 @@ describe('QoderLanguageModel', () => {
     lastQueryParams = null
     mockQueryError = null
     mockQueryFn.mockClear()
+    delete process.env.OPENCODE
     // 重置 mcp-bridge 全局状态，避免测试间污染
     const bridge = await import('../src/mcp-bridge.js')
     bridge.setMcpBridgeServers({})
@@ -52,6 +53,7 @@ describe('QoderLanguageModel', () => {
   })
 
   afterEach(() => {
+    delete process.env.OPENCODE
     vi.restoreAllMocks()
   })
 
@@ -164,6 +166,42 @@ describe('QoderLanguageModel', () => {
 
       const finish = parts.find((p) => p.type === 'finish')
       expect(finish?.finishReason).toBe('stop')
+    })
+
+    it('OPENCODE=1 时 finishReason 带 unified 兼容字段，但序列化后仍是字符串', async () => {
+      process.env.OPENCODE = '1'
+      try {
+        pushTextDelta('hi')
+        pushSuccessResult()
+
+        const model = new QoderLanguageModel('auto')
+        const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+        const finish = parts.find((p) => p.type === 'finish')
+        expect(finish).toBeDefined()
+        expect(String(finish?.finishReason)).toBe('stop')
+        expect((finish?.finishReason as any).unified).toBe('stop')
+        expect(JSON.parse(JSON.stringify(finish)).finishReason).toBe('stop')
+      } finally {
+        delete process.env.OPENCODE
+      }
+    })
+
+    it('query env 会剥离 OPENCODE 与 OPENCODE_PID，避免 Qoder CLI 隐藏外部 MCP 工具', async () => {
+      process.env.OPENCODE = '1'
+      process.env.OPENCODE_PID = '12345'
+      try {
+        pushSuccessResult()
+
+        const model = new QoderLanguageModel('auto')
+        await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+        expect(lastQueryParams?.options?.env?.OPENCODE).toBeUndefined()
+        expect(lastQueryParams?.options?.env?.OPENCODE_PID).toBeUndefined()
+      } finally {
+        delete process.env.OPENCODE
+        delete process.env.OPENCODE_PID
+      }
     })
 
     it('使用正确的 modelId 传递给 query()', async () => {
@@ -1714,6 +1752,215 @@ describe('QoderLanguageModel', () => {
       const toolCall = parts.find((p) => p.type === 'tool-call')
       expect(toolCall).toBeDefined()
       expect((toolCall as any).toolName).toBe('edit')
+    })
+
+    // ── stream-start：AI SDK v2 协议要求在任何内容前显式发出 ────────────────
+    // 修复：缺少 stream-start 会导致 opencode e2e 中 step-finish 丢失 reason，
+    // 进而使 opencode run 无限重复 step。
+
+    it('doStream 的第一个 part 必须是 stream-start（含 warnings 数组）', async () => {
+      pushTextDelta('hello')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(parts.length).toBeGreaterThan(0)
+      expect(parts[0].type).toBe('stream-start')
+      expect((parts[0] as any).warnings).toEqual([])
+    })
+
+    it('stream-start 仅发出一次，不随内容重复', async () => {
+      pushTextDelta('a')
+      pushTextDelta('b')
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const streamStarts = parts.filter((p) => p.type === 'stream-start')
+      expect(streamStarts).toHaveLength(1)
+    })
+
+    // ── 回归测试：finishReason 死循环修复 ─────────────────────────────────────
+    // 修复：stop_reason=tool_use 但同一 query 内 tool_result 已到达、pending 已清空时，
+    // finishReason 必须为 stop，否则 opencode 会误判为还需继续执行而陷入无限循环。
+
+    it('[回归] stop_reason=tool_use 但 pendingToolCalls 已清空时，finishReason 应为 stop（不触发死循环）', async () => {
+      // CLI 发出 bash 工具调用
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_regression_001', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      // 同一 query 内，tool_result 已到达 → pendingToolCalls 清空
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_regression_001', content: 'file.ts' }] },
+      })
+      // message_delta 带 stop_reason=tool_use（CLI 有时在工具完成后仍上报此 stop_reason）
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } },
+      })
+      // result 到达时 pendingToolCalls 已为空
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // pendingToolCalls 已清空 → finishReason 必须为 stop，不能为 tool-calls
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('stop')
+    })
+
+    it('[回归] 确实还有待处理的 tool call 时（未收到 tool_result），finishReason 仍为 tool-calls', async () => {
+      // CLI 发出 bash 工具调用，但没有发出对应的 tool_result（opencode 负责执行，pending 未清空）
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_regression_002', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"pwd"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      // 没有 user tool_result → pendingToolCalls 仍有 call_regression_002
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // pendingToolCalls 未清空（size=1）→ finishReason 必须为 tool-calls，opencode 继续执行
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    // ── abort/cancel 清理测试 ─────────────────────────────────────────────────
+
+    it('options.abortSignal.abort() 后，query() 收到了 abortController 且触发 abort', async () => {
+      // 构造一个永不结束的 query mock（阻塞在异步迭代中）
+      // 使用可控的 Promise 让生成器挂起，等待 abortSignal 触发
+      let resolveBlock!: () => void
+      const blockPromise = new Promise<void>((resolve) => { resolveBlock = resolve })
+
+      mockQueryFn.mockImplementationOnce((params: { prompt: unknown; options: unknown }) => {
+        lastQueryParams = params
+        return (async function* () {
+          // 挂起，等待外部 resolve；yield* 空数组让 TS 识别为合法生成器
+          yield* []
+          await blockPromise
+        })()
+      })
+
+      const abortController = new AbortController()
+      const model = new QoderLanguageModel('auto')
+      const streamPromise = model.doStream(buildCallOptions('ping', {
+        abortSignal: abortController.signal,
+      }))
+      const { stream } = await streamPromise
+
+      // 启动 reader 消费（异步，后台运行）
+      const reader = stream.getReader()
+      const readPromise = reader.read()
+
+      // abort 后 unblock 生成器让 stream 能结束
+      abortController.abort()
+      resolveBlock()
+
+      // stream 应该正常结束（不会永久挂起）
+      await readPromise.catch(() => { /* ignore */ })
+
+      // 验证 query() 调用时传入了 abortController
+      expect(lastQueryParams).toBeDefined()
+      expect((lastQueryParams as any).options.abortController).toBeDefined()
+      expect((lastQueryParams as any).options.abortController).toBeInstanceOf(AbortController)
+
+      // abort 后，传入 query 的 abortController 应已触发
+      expect((lastQueryParams as any).options.abortController.signal.aborted).toBe(true)
+    })
+
+    it('取消 ReadableStream reader 后，query 清理路径被调用，不留悬挂执行', async () => {
+      // 记录 query 返回的生成器对象，以验证 return() 是否被调用
+      let generatorReturnCalled = false
+      const neverEndingGen = (async function* () {
+        try {
+          // 永不结束
+          await new Promise<never>(() => { /* block forever */ })
+        } finally {
+          // finally 块在 return() 调用时执行
+          generatorReturnCalled = true
+        }
+      })()
+
+      // 包装 return() 以监控调用
+      const origReturn = neverEndingGen.return.bind(neverEndingGen)
+      neverEndingGen.return = async (value: unknown) => {
+        generatorReturnCalled = true
+        return origReturn(value)
+      }
+
+      mockQueryFn.mockImplementationOnce((params: { prompt: unknown; options: unknown }) => {
+        lastQueryParams = params
+        return neverEndingGen
+      })
+
+      const model = new QoderLanguageModel('auto')
+      const { stream } = await model.doStream(buildCallOptions('ping'))
+
+      const reader = stream.getReader()
+      // 先读一次（stream-start 已发出），然后取消 reader
+      await reader.read() // 得到 stream-start
+      await reader.cancel()  // 触发 ReadableStream cancel() → cleanup()
+
+      // cleanup 后，传入 query 的 abortController 应已 abort
+      expect((lastQueryParams as any).options.abortController).toBeDefined()
+      expect((lastQueryParams as any).options.abortController.signal.aborted).toBe(true)
+
+      // query 生成器的 return() 应已被调用（或被幂等保护）
+      // 等待一个 microtask 让 void promise 完成
+      await new Promise((r) => setTimeout(r, 0))
+      expect(generatorReturnCalled).toBe(true)
     })
   })
 })
