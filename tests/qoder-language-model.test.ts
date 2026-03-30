@@ -1501,6 +1501,220 @@ describe('QoderLanguageModel', () => {
       expect(textContent).toBeDefined()
       expect((textContent as any).text).toBe('generated text')
     })
+
+    // ── experimentalMcpLoad ───────────────────────────────────────────────────
+
+    it('experimentalMcpLoad=true 时 extraArgs 中包含 --experimental-mcp-load', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  experimentalMcpLoad: true,
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastQueryParams?.options?.extraArgs).toBeDefined()
+      expect(lastQueryParams.options.extraArgs['--experimental-mcp-load']).toBeNull()
+    })
+
+    it('experimentalMcpLoad=true 时 mcpServers 仍然正常透传', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  experimentalMcpLoad: true,
+                  mcpServers: {
+                    weather: { command: 'npx', args: ['-y', '@acme/weather-mcp'] },
+                  },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      // extraArgs 包含 flag
+      expect(lastQueryParams?.options?.extraArgs?.['--experimental-mcp-load']).toBeNull()
+      // mcpServers 仍然存在
+      expect(lastQueryParams?.options?.mcpServers?.weather).toBeDefined()
+      expect(lastQueryParams.options.mcpServers.weather.command).toBe('npx')
+    })
+
+    it('experimentalMcpLoad=false 时不注入 --experimental-mcp-load', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  experimentalMcpLoad: false,
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastQueryParams?.options?.extraArgs).toBeUndefined()
+    })
+
+    // ── extraArgs 透传 ────────────────────────────────────────────────────────
+
+    it('providerOptions.qoder.extraArgs 透传到 query() options', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  extraArgs: { '--max-turns': '10', '--verbose': null },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastQueryParams?.options?.extraArgs).toBeDefined()
+      expect(lastQueryParams.options.extraArgs['--max-turns']).toBe('10')
+      expect(lastQueryParams.options.extraArgs['--verbose']).toBeNull()
+    })
+
+    it('extraArgs 与 experimentalMcpLoad 协同工作，合并到同一个对象', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: {
+                  experimentalMcpLoad: true,
+                  extraArgs: { '--max-turns': '5' },
+                },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(lastQueryParams?.options?.extraArgs?.['--max-turns']).toBe('5')
+      expect(lastQueryParams?.options?.extraArgs?.['--experimental-mcp-load']).toBeNull()
+    })
+
+    it('未设置 extraArgs 且 experimentalMcpLoad=false 时 query() 不传 extraArgs', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastQueryParams?.options?.extraArgs).toBeUndefined()
+    })
+
+    // ── str_replace_based_edit_tool 映射 ──────────────────────────────────────
+
+    it('str_replace_based_edit_tool 映射为 edit 工具名', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_sre_001',
+              name: 'str_replace_based_edit_tool',
+              input: {
+                file_path: '/tmp/a.ts',
+                old_string: 'foo',
+                new_string: 'bar',
+              },
+            },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'edit', description: 'Edit file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      // str_replace_based_edit_tool → edit
+      expect((toolCall as any).toolName).toBe('edit')
+      // 参数 snake_case 映射为 camelCase（经 normalizeToolInput edit 分支处理）
+      expect(JSON.parse((toolCall as any).input)).toEqual({
+        filePath: '/tmp/a.ts',
+        oldString: 'foo',
+        newString: 'bar',
+      })
+    })
+
+    it('str_replace_based_edit_tool（大小写变体）也映射为 edit', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_sre_002', name: 'Str_Replace_Based_Edit_Tool' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/tmp/b.ts","old_string":"x","new_string":"y"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'edit', description: 'Edit file', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCall = parts.find((p) => p.type === 'tool-call')
+      expect(toolCall).toBeDefined()
+      expect((toolCall as any).toolName).toBe('edit')
+    })
   })
 })
 

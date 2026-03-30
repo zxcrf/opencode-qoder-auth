@@ -109,6 +109,7 @@ function normalizeToolName(name: string): string {
   if (lower === 'askuserquestion') return 'question'
   if (lower === 'agent') return 'task'
   if (lower === 'exitplanmode') return 'plan_exit'
+  if (lower === 'str_replace_based_edit_tool') return 'edit'
   // CLI MCP proxy 格式：mcp__{serverName}__{toolName} → {serverName}_{toolName}
   if (lower.startsWith('mcp__')) {
     const withoutPrefix = lower.slice(5) // 去掉 'mcp__'
@@ -241,6 +242,10 @@ type QoderMcpServerConfig =
 
 type QoderProviderOptions = {
   mcpServers?: Record<string, unknown>
+  /** 透传到 SDK query options 的额外 CLI 参数；值为 null 表示仅传 flag 不带值 */
+  extraArgs?: Record<string, string | null>
+  /** 为 true 时向 CLI 传递 --experimental-mcp-load flag */
+  experimentalMcpLoad?: boolean
 }
 
 const DEFAULT_QODER_MAX_BUFFER_SIZE = 8 * 1024 * 1024
@@ -259,6 +264,7 @@ function buildQoderQueryOptions(
   cwd: string
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
+  extraArgs?: Record<string, string | null>
 } {
   const providerOptions = getQoderProviderOptions(options.providerOptions)
 
@@ -271,6 +277,15 @@ function buildQoderQueryOptions(
     ...extractMcpServersFromTools(options.tools),                              // provider-defined tools（最高优先级）
   }
 
+  // 合并 extraArgs：先放用户透传的，再叠加功能开关生成的 flag
+  const baseExtraArgs: Record<string, string | null> = isRecord(providerOptions?.extraArgs)
+    ? pickNullableStringRecord(providerOptions.extraArgs)
+    : {}
+  if (providerOptions?.experimentalMcpLoad === true) {
+    baseExtraArgs['--experimental-mcp-load'] = null
+  }
+  const hasExtraArgs = Object.keys(baseExtraArgs).length > 0
+
   return {
     model: modelId,
     allowDangerouslySkipPermissions: true,
@@ -281,6 +296,7 @@ function buildQoderQueryOptions(
     cwd: process.cwd(),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(hasExtraArgs ? { extraArgs: baseExtraArgs } : {}),
   }
 }
 
@@ -735,6 +751,15 @@ function pickStringRecord(value: unknown): Record<string, string> | undefined {
     (e): e is [string, string] => typeof e[1] === 'string',
   )
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+function pickNullableStringRecord(value: unknown): Record<string, string | null> {
+  if (!isRecord(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (e): e is [string, string | null] => e[1] === null || typeof e[1] === 'string',
+    ),
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
