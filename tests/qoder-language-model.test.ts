@@ -225,6 +225,54 @@ describe('QoderLanguageModel', () => {
       expect(lastQueryParams.prompt).toContain('hello world')
     })
 
+    it('[回归] 最后一条 user 之后的 tool 上下文会继续传给 query()', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream(
+        (
+          await model.doStream({
+            inputFormat: 'prompt',
+            mode: { type: 'regular' },
+            prompt: [
+              { role: 'user', content: [{ type: 'text', text: 'list files please' }] },
+              {
+                role: 'assistant',
+                content: [
+                  {
+                    type: 'tool-call',
+                    toolCallId: 'tc-qoder-1',
+                    toolName: 'Bash',
+                    input: { command: 'ls /tmp' },
+                  },
+                ],
+              },
+              {
+                role: 'tool',
+                content: [
+                  {
+                    type: 'tool-result',
+                    toolCallId: 'tc-qoder-1',
+                    toolName: 'Bash',
+                    output: [{ type: 'text', value: 'a.txt\nb.txt' }],
+                  },
+                ],
+              },
+            ],
+          })
+        ).stream,
+      )
+
+      expect(typeof lastQueryParams?.prompt).toBe('string')
+      expect(lastQueryParams?.prompt).toContain('list files please')
+      expect(lastQueryParams?.prompt).toContain('<conversation_continuation>')
+      expect(lastQueryParams?.prompt).toContain('<tool_call id="tc-qoder-1" name="Bash">')
+      expect(lastQueryParams?.prompt).toContain('<tool_result id="tc-qoder-1" name="Bash">')
+      expect(lastQueryParams?.prompt.indexOf('list files please')).toBeLessThan(
+        lastQueryParams?.prompt.indexOf('<conversation_continuation>') ?? -1,
+      )
+    })
+
     it('query() 默认提升 maxBufferSize 到 8MB', async () => {
       pushSuccessResult()
 
@@ -1223,13 +1271,12 @@ describe('QoderLanguageModel', () => {
       })
     })
 
-    it('Agent 映射为 task，ExitPlanMode 映射为 plan_exit', async () => {
+    it('Agent 由 CLI 内部执行（provider-executed），不转发给 opencode', async () => {
       mockMessages.push({
         type: 'assistant',
         message: {
           content: [
-            { type: 'tool_use', id: 'call_map_task', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'explorer' } },
-            { type: 'tool_use', id: 'call_map_plan', name: 'ExitPlanMode', input: {} },
+            { type: 'tool_use', id: 'call_agent_001', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'general-purpose' } },
           ],
         },
       })
@@ -1242,6 +1289,34 @@ describe('QoderLanguageModel', () => {
             buildCallOptions('ping', {
               tools: [
                 { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // Agent 不应被转发为 function tool-call（它被 CLI 内部执行）
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(0)
+    })
+
+    it('ExitPlanMode 映射为 plan_exit', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_map_plan', name: 'ExitPlanMode', input: {} },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
                 { type: 'function', name: 'plan_exit', description: 'Exit plan', inputSchema: { type: 'object', properties: {} } },
               ],
             }),
@@ -1250,8 +1325,141 @@ describe('QoderLanguageModel', () => {
       )
 
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
-      expect((toolCalls[0] as any).toolName).toBe('task')
-      expect((toolCalls[1] as any).toolName).toBe('plan_exit')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('plan_exit')
+    })
+
+    it('query options 包含 agents 定义以支持 CLI subagent 派发', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(lastQueryParams?.options?.agents).toBeDefined()
+      expect(lastQueryParams.options.agents['general-purpose']).toBeDefined()
+      expect(lastQueryParams.options.agents['general-purpose'].description).toBeTruthy()
+      expect(lastQueryParams.options.agents['general-purpose'].prompt).toBeTruthy()
+    })
+
+    it('Task 由 CLI 内部执行（provider-executed），即使 opencode 有 task 函数工具也不转发', async () => {
+      // CLI 发出 Task 工具调用。即使 opencode 的 tools 中有 task，
+      // Task 也由 CLI 内部 subagent 机制执行，不转发给 opencode（避免 "Unknown agent type" 错误）
+      const agentBridge = await import('../src/agent-bridge.js')
+      agentBridge.setAvailableAgentTypes(['explorer', 'fixer', 'designer', 'oracle', 'librarian'])
+
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_task_001', name: 'Task', input: { description: 'search', prompt: 'find it', subagent_type: 'general-purpose' } },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // Task 不应被转发为 function tool-call（它被 CLI 内部 subagent 执行）
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(0)
+
+      // 清理
+      agentBridge.setAvailableAgentTypes([])
+    })
+
+    it('Task（stream_event 路径）也由 CLI 内部执行，不转发给 opencode', async () => {
+      // stream_event 路径下 Task 也应该被当作 provider-executed
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_task_002', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"d","prompt":"p","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // stream_event 路径下 Task 同样不应被转发
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(0)
+
+      // 不应有 tool-input-start/delta/end 事件（provider-executed 时跳过）
+      const toolInputEvents = parts.filter((p) =>
+        ['tool-input-start', 'tool-input-delta', 'tool-input-end'].includes(p.type)
+      )
+      expect(toolInputEvents).toHaveLength(0)
+    })
+
+    it('Task/Agent 工具不影响其他 function 工具的正常转发', async () => {
+      // 确保删除 task/agent 不影响其他工具
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_bash_coexist', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      // bash 应正常转发（它不是 task/agent）
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('bash')
     })
 
     // ── finishReason：有 tool-call 时应为 'tool-calls' ─────────────────────

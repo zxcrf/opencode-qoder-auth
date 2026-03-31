@@ -1,7 +1,8 @@
 import type { Plugin, Hooks } from '@opencode-ai/plugin'
 import { QODER_MODELS } from './src/models.js'
 import { setMcpBridgeServers } from './src/mcp-bridge.js'
-import { existsSync } from 'node:fs'
+import { setAvailableAgentTypes } from './src/agent-bridge.js'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -39,6 +40,13 @@ export const QoderProviderPlugin: Plugin = async () => {
       // normalizeMcpServerConfig 的格式转换已内联在 mcp-bridge 中，这里直接转换
       const bridgedMcp = convertOpencodeMcp(config.mcp)
       setMcpBridgeServers(bridgedMcp)
+
+      // 检测可用的 agent 类型：oh-my-opencode-slim 等插件会替换标准 agent 类型
+      // 此处从插件配置中提取实际可用的类型，供 normalizeToolInputObject 做映射
+      const detectedAgentTypes = detectAgentTypes(config)
+      if (detectedAgentTypes.length > 0) {
+        setAvailableAgentTypes(detectedAgentTypes)
+      }
 
       const mergedProviderOptions = {
         ...(existing.options ?? {}),
@@ -174,4 +182,71 @@ function pickStringRecord(value: unknown): Record<string, string> | undefined {
     (e): e is [string, string] => typeof e[1] === 'string',
   )
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
+}
+
+// ── agent type 检测 ──────────────────────────────────────────────────────────
+
+/**
+ * 从 opencode config 和 oh-my-opencode-slim 配置中检测可用的 agent 类型。
+ *
+ * 检测优先级：
+ * 1. config.agent 中非 disabled 的自定义 agent
+ * 2. oh-my-opencode-slim 配置文件中活跃 preset 的 agent 类型
+ */
+function detectAgentTypes(config: Record<string, unknown>): string[] {
+  // 方案 1：从 config.agent 读取（oh-my-opencode-slim 可能在此注入）
+  const agentConfig = config.agent
+  if (agentConfig && typeof agentConfig === 'object' && !Array.isArray(agentConfig)) {
+    const types = Object.entries(agentConfig as Record<string, unknown>)
+      .filter(([, v]) => {
+        if (!v || typeof v !== 'object') return false
+        return (v as Record<string, unknown>).disable !== true
+      })
+      .map(([k]) => k)
+    if (types.length > 0) return types
+  }
+
+  // 方案 2：直接读取 oh-my-opencode-slim 配置文件
+  return detectOhMyOpencodeSlimTypes(config)
+}
+
+/**
+ * 从 oh-my-opencode-slim 配置文件中检测 agent 类型
+ */
+function detectOhMyOpencodeSlimTypes(config: Record<string, unknown>): string[] {
+  // 检查 plugin 列表中是否包含 oh-my-opencode-slim
+  const plugins = Array.isArray(config.plugin) ? config.plugin : []
+  const hasOMS = plugins.some((p) =>
+    typeof p === 'string' && (p.includes('oh-my-opencode-slim') || p.includes('oh-my-opencode')),
+  )
+  if (!hasOMS) return []
+
+  // 尝试读取配置文件
+  const configPaths = [
+    join(homedir(), '.config', 'opencode', 'oh-my-opencode-slim.jsonc'),
+    join(homedir(), '.config', 'opencode', 'oh-my-opencode-slim.json'),
+    join(homedir(), '.config', 'opencode', 'oh-my-opencode.jsonc'),
+    join(homedir(), '.config', 'opencode', 'oh-my-opencode.json'),
+  ]
+
+  for (const cfgPath of configPaths) {
+    try {
+      if (!existsSync(cfgPath)) continue
+      const raw = readFileSync(cfgPath, 'utf8')
+      // 简单处理 JSONC：去掉行注释和块注释
+      const cleaned = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')
+      const parsed = JSON.parse(cleaned) as Record<string, unknown>
+
+      const preset = typeof parsed.preset === 'string' ? parsed.preset : undefined
+      const presets = parsed.presets as Record<string, unknown> | undefined
+      if (!preset || !presets) continue
+
+      const activePreset = presets[preset]
+      if (!activePreset || typeof activePreset !== 'object') continue
+
+      return Object.keys(activePreset as Record<string, unknown>)
+    } catch { /* ignore parse errors */ }
+  }
+
+  return []
 }
