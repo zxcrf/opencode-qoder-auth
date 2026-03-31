@@ -53,9 +53,9 @@ configure({
 
 // ── 调试日志 — 保存原始 stderr 引用，不受 SDK log filter 影响 ────────────────
 const _rawStderr = process.stderr.write.bind(process.stderr)
-function debugLog(msg: string): void {
+function debugLog(msg: string, traceId?: string): void {
   if (process.env.QODER_DEBUG === '1') {
-    _rawStderr(`[QODER_DEBUG] ${msg}\n`)
+    _rawStderr(`[QODER_DEBUG${traceId ? ` ${traceId}` : ''}] ${msg}\n`)
   }
 }
 
@@ -514,9 +514,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
     const cliPath = resolveQoderCLI()
     const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath, this.providerOptions)
 
-    debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}`)
-    debugLog(`doStream() prompt length=${typeof prompt === 'string' ? prompt.length : 'non-string'}`)
-    debugLog(`doStream() qoderOptions.mcpServers=[${Object.keys(qoderOptions.mcpServers ?? {}).join(',')}]`)
+    const streamTraceId = randomUUID().slice(0, 8)
+    debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}`, streamTraceId)
+    debugLog(`doStream() prompt length=${typeof prompt === 'string' ? prompt.length : 'non-string'}`, streamTraceId)
+    debugLog(`doStream() qoderOptions.mcpServers=[${Object.keys(qoderOptions.mcpServers ?? {}).join(',')}]`, streamTraceId)
 
     // opencode function 工具名集合（由 opencode 管理并执行，如 bash、read、context7_resolve-library-id 等）
     // 这些工具调用不带 providerExecuted，让 opencode 负责执行
@@ -529,7 +530,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
         .filter((t) => t.type === 'function')
         .map((t) => normalizeToolName(t.name))
     )
-    debugLog(`doStream() hasTools=${hasTools}, functionToolNames=[${[...functionToolNames].join(',')}]`)
+    debugLog(`doStream() hasTools=${hasTools}, functionToolNames=[${[...functionToolNames].join(',')}]`, streamTraceId)
 
     // 每次 query 独立的 AbortController，用于中断后台 qodercli 进程
     const abortController = new AbortController()
@@ -591,6 +592,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
         // 典型值：tool_use / end_turn
         let lastAssistantStopReason: string | undefined
 
+        // 一旦 task 这类需要外部完成的 function tool 已经发出并收到 SDK 回放的 tool_result，
+        // 当前轮后续 assistant/text/tool 输出都应被抑制；上层必须等真实工具结果后再发起下一轮。
+        let suppressFurtherAssistantContent = false
+
         try {
           // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
           const qoderQuery = query({ prompt, options: { ...qoderOptions, abortController } })
@@ -599,15 +604,26 @@ export class QoderLanguageModel implements LanguageModelV2 {
           for await (const msg of qoderQuery) {
             sdkMsgCount++
             const m = msg as Record<string, unknown>
-            debugLog(`SDK msg #${sdkMsgCount}: type=${m.type}${m.subtype ? ` subtype=${m.subtype}` : ''}`)
+            debugLog(`SDK msg #${sdkMsgCount}: type=${m.type}${m.subtype ? ` subtype=${m.subtype}` : ''}`, streamTraceId)
             if (m.type === 'system' && m.subtype === 'init') {
               const tools = Array.isArray(m.tools) ? m.tools.join(',') : ''
               const mcpServers = Array.isArray(m.mcp_servers) ? JSON.stringify(m.mcp_servers) : '[]'
-              debugLog(`SDK init: tools=[${tools}] mcp_servers=${mcpServers}`)
+              debugLog(`SDK init: tools=[${tools}] mcp_servers=${mcpServers}`, streamTraceId)
             }
 
             // ── stream_event：增量文本 / 增量工具输入（流式 CLI 支持时） ──
             if (m.type === 'stream_event') {
+              if (suppressFurtherAssistantContent) {
+                const ev = (m as { event: Record<string, unknown> }).event
+                if (ev.type === 'message_delta' && isRecord(ev.delta) && typeof ev.delta.stop_reason === 'string') {
+                  lastAssistantStopReason = ev.delta.stop_reason
+                  debugLog(`message_delta (suppressed): stop_reason=${ev.delta.stop_reason}`, streamTraceId)
+                } else {
+                  debugLog(`suppressed stream_event after external-wait state: ${String(ev.type)}`, streamTraceId)
+                }
+                continue
+              }
+
               const ev = (m as { event: Record<string, unknown> }).event
 
               if (ev.type === 'content_block_start' && isRecord(ev.content_block)) {
@@ -619,7 +635,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                   const toolName = normalizeToolName(block.name)
                   // normalizeToolName 统一处理：大小写 + AskUserQuestion→question + mcp__server__tool→server_tool
                   const isProviderExecuted = hasTools && !functionToolNames.has(toolName)
-                  debugLog(`tool_use block_start: raw=${block.name} → normalized=${toolName}, inFunctionTools=${functionToolNames.has(toolName)}, isProviderExecuted=${isProviderExecuted}`)
+                  debugLog(`tool_use block_start: raw=${block.name} → normalized=${toolName}, inFunctionTools=${functionToolNames.has(toolName)}, isProviderExecuted=${isProviderExecuted}`, streamTraceId)
                   streamToolBlocks.set(idx, { id: block.id, name: toolName, input: '', isProviderExecuted })
                   if (!isProviderExecuted) {
                     controller.enqueue({
@@ -681,8 +697,13 @@ export class QoderLanguageModel implements LanguageModelV2 {
                       input: normalizedInput,
                     } as LanguageModelV2StreamPart)
                     emittedFunctionToolCall = true
-                    debugLog(`emitted tool-call to opencode: toolName=${toolBlock.name}, id=${toolBlock.id}`)
+                    debugLog(`emitted tool-call to opencode: toolName=${toolBlock.name}, id=${toolBlock.id}`, streamTraceId)
                     toolBlock.input = normalizedInput
+
+                    if (waitForExternalCompletionToolNames.has(toolBlock.name)) {
+                      suppressFurtherAssistantContent = true
+                      debugLog(`enter external-wait state immediately after tool-call for toolName=${toolBlock.name}, tool_use_id=${toolBlock.id}`, streamTraceId)
+                    }
                   }
                   pendingToolCalls.set(toolBlock.id, {
                     toolName: toolBlock.name,
@@ -699,11 +720,16 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 }
               } else if (ev.type === 'message_delta' && isRecord(ev.delta) && typeof ev.delta.stop_reason === 'string') {
                 lastAssistantStopReason = ev.delta.stop_reason
-                debugLog(`message_delta: stop_reason=${ev.delta.stop_reason}`)
+                  debugLog(`message_delta: stop_reason=${ev.delta.stop_reason}`, streamTraceId)
               }
 
             // ── assistant：完整消息块（CLI 不支持流式时走此路径） ──────────
             } else if (m.type === 'assistant') {
+              if (suppressFurtherAssistantContent) {
+                debugLog('suppressed assistant message after external-wait state', streamTraceId)
+                continue
+              }
+
               const rawContent = (m.message as Record<string, unknown> | undefined)?.content
               const content = Array.isArray(rawContent) ? rawContent : []
               for (const block of content) {
@@ -747,6 +773,11 @@ export class QoderLanguageModel implements LanguageModelV2 {
                     emittedFunctionToolCall = true
                     // 更新 input 到 pendingToolCalls
                     pendingToolCalls.set(block.id, { toolName, input: inputJson, isProviderExecuted })
+
+                    if (waitForExternalCompletionToolNames.has(toolName)) {
+                      suppressFurtherAssistantContent = true
+                      debugLog(`enter external-wait state immediately after assistant tool-call for toolName=${toolName}, tool_use_id=${block.id}`, streamTraceId)
+                    }
                   }
                 }
               }
@@ -760,7 +791,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
 
                 const toolCall = pendingToolCalls.get(block.tool_use_id)
-                debugLog(`tool_result: tool_use_id=${block.tool_use_id}, found=${!!toolCall}, toolName=${toolCall?.toolName}, isProviderExecuted=${toolCall?.isProviderExecuted}`)
+                debugLog(`tool_result: tool_use_id=${block.tool_use_id}, found=${!!toolCall}, toolName=${toolCall?.toolName}, isProviderExecuted=${toolCall?.isProviderExecuted}`, streamTraceId)
                 if (!toolCall) continue
 
                 // CLI 内置工具（isProviderExecuted=true）的结果由 provider 自己消费，
@@ -778,9 +809,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
             // ── result：会话结束 ────────────────────────────────────────
             } else if (m.type === 'result') {
               const outstandingToolCallCount = pendingToolCalls.size
-              debugLog(`result: subtype=${m.subtype}, is_error=${m.is_error}, pendingToolCalls=${outstandingToolCallCount}, emittedFunctionToolCall=${emittedFunctionToolCall}, lastStopReason=${lastAssistantStopReason}`)
+              debugLog(`result: subtype=${m.subtype}, is_error=${m.is_error}, pendingToolCalls=${outstandingToolCallCount}, emittedFunctionToolCall=${emittedFunctionToolCall}, lastStopReason=${lastAssistantStopReason}`, streamTraceId)
               if (outstandingToolCallCount > 0) {
-                debugLog(`result: outstanding tools: ${[...pendingToolCalls.entries()].map(([id, t]) => `${t.toolName}(${id},prov=${t.isProviderExecuted})`).join(', ')}`)
+                debugLog(`result: outstanding tools: ${[...pendingToolCalls.entries()].map(([id, t]) => `${t.toolName}(${id},prov=${t.isProviderExecuted})`).join(', ')}`, streamTraceId)
               }
 
               // 关闭所有未关闭的文本块和推理块
@@ -819,7 +850,7 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 const hasOutstandingFunctionToolCalls = emittedFunctionToolCall && outstandingToolCallCount > 0
                 const mappedFinishReason: LanguageModelV2FinishReason =
                   hasOutstandingFunctionToolCalls ? 'tool-calls' : 'stop'
-                debugLog(`finish: mappedFinishReason=${mappedFinishReason} (emittedFunctionToolCall=${emittedFunctionToolCall}, outstandingToolCallCount=${outstandingToolCallCount})`)
+                debugLog(`finish: mappedFinishReason=${mappedFinishReason} (emittedFunctionToolCall=${emittedFunctionToolCall}, outstandingToolCallCount=${outstandingToolCallCount})`, streamTraceId)
                 controller.enqueue({
                   type: 'finish',
                   finishReason: decorateFinishReason(mappedFinishReason),
@@ -840,14 +871,14 @@ export class QoderLanguageModel implements LanguageModelV2 {
           }
 
           if (!hasFinish) {
-            debugLog('stream ended without result message, emitting fallback finish=stop')
+            debugLog('stream ended without result message, emitting fallback finish=stop', streamTraceId)
             controller.enqueue({
               type: 'finish',
               finishReason: decorateFinishReason('stop'),
               usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
             })
           }
-          debugLog('stream complete, closing controller')
+          debugLog('stream complete, closing controller', streamTraceId)
           cleanup()
           controller.close()
         } catch (err) {

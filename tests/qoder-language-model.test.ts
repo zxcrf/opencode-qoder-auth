@@ -1434,7 +1434,7 @@ describe('QoderLanguageModel', () => {
       agentBridge.setAvailableAgentTypes([])
     })
 
-    it('Task 与其他 function 工具可以共存并分别正常转发', async () => {
+    it('Task 发出后会立即抑制同轮后续其他 function 工具转发', async () => {
       mockMessages.push({
         type: 'stream_event',
         event: {
@@ -1486,14 +1486,14 @@ describe('QoderLanguageModel', () => {
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
       const taskCall = toolCalls.find((p) => (p as any).toolName === 'task')
       const bashCall = toolCalls.find((p) => (p as any).toolName === 'bash')
-      expect(toolCalls).toHaveLength(2)
+      expect(toolCalls).toHaveLength(1)
       expect(taskCall).toBeDefined()
       expect(JSON.parse((taskCall as any).input)).toEqual({
         description: 'd',
         prompt: 'p',
         subagent_type: 'general-purpose',
       })
-      expect(bashCall).toBeDefined()
+      expect(bashCall).toBeUndefined()
     })
 
     it('Task 在没有 opencode task 工具时不会转发给 opencode', async () => {
@@ -2276,6 +2276,201 @@ describe('QoderLanguageModel', () => {
 
       const finish = parts.find((p) => p.type === 'finish')
       expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('[回归] task tool-call 后同一 query 的后续 text 不应继续推流', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_task_text_001', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"Explore","prompt":"Inspect","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_task_text_001', content: 'Tool execution aborted' }] },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '这段文本不应继续推流' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 1 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const textDeltas = parts.filter((p) => p.type === 'text-delta')
+      expect(textDeltas).toHaveLength(0)
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('[回归] task tool-call 后同一 query 的后续 tool_use 不应继续推流', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_task_tool_001', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"Explore","prompt":"Inspect","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call_task_tool_001', content: 'Tool execution aborted' }] },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'tool_use', id: 'call_bash_after_task', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 1 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+
+      const finish = parts.find((p) => p.type === 'finish')
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('[回归] task tool-call 一发出后即应抑制同一 query 的后续 text 与 tool_use（无需等待 tool_result）', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_task_immediate_001', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"Explore","prompt":"Inspect","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '这段文本不应在 task 后继续出现' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 1 },
+      })
+
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 2,
+          content_block: { type: 'tool_use', id: 'call_bash_after_task_immediate', name: 'bash' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 2 },
+      })
+
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+
+      const textDeltas = parts.filter((p) => p.type === 'text-delta')
+      expect(textDeltas).toHaveLength(0)
+
+      const finish = parts.find((p) => p.type === 'finish')
       expect((finish as any).finishReason).toBe('tool-calls')
     })
 
