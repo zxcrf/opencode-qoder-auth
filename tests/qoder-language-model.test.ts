@@ -282,6 +282,36 @@ describe('QoderLanguageModel', () => {
       expect(lastQueryParams?.options?.maxBufferSize).toBe(8 * 1024 * 1024)
     })
 
+    it('多模态 query 使用与 options.sessionId 一致的 SDK user session_id', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      await collectStream((await model.doStream({
+        inputFormat: 'prompt',
+        mode: { type: 'regular' },
+        prompt: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', image: 'data:image/png;base64,abc123==', mimeType: 'image/png' },
+              { type: 'text', text: 'describe image' },
+            ],
+          },
+        ],
+      })).stream)
+
+      expect(typeof lastQueryParams?.options?.sessionId).toBe('string')
+      expect(typeof lastQueryParams?.prompt).not.toBe('string')
+
+      const messages: Array<{ session_id?: string }> = []
+      for await (const msg of lastQueryParams?.prompt as AsyncIterable<{ session_id?: string }>) {
+        messages.push(msg)
+      }
+
+      expect(messages).toHaveLength(1)
+      expect(messages[0].session_id).toBe(lastQueryParams?.options?.sessionId)
+    })
+
     it('每次 query() 都使用新的 sessionId，避免错误续用旧会话', async () => {
       pushSuccessResult()
       pushSuccessResult()

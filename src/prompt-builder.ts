@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, resolve } from 'node:path'
 
+const DEFAULT_CONTEXT_LIMIT = 180000
+const APPROX_CHARS_PER_TOKEN = 4
+const PROMPT_CONTEXT_BUDGET_RATIO = 0.7
+
 /**
  * 从 opencode 传入的 LanguageModelV2CallOptions 中构造 Qoder query 的 prompt。
  *
@@ -15,9 +19,10 @@ import { extname, resolve } from 'node:path'
  */
 export function buildPromptFromOptions(
   options: LanguageModelV2CallOptions,
+  sessionId?: string,
 ): string | AsyncIterable<SDKUserMessage> {
   if (hasImageContent(options.prompt)) {
-    return buildAsyncIterablePrompt(options.prompt)
+    return buildAsyncIterablePrompt(options.prompt, sessionId)
   }
   return buildStringPrompt(options.prompt)
 }
@@ -81,19 +86,64 @@ function hasImageContent(prompt: LanguageModelV2Prompt): boolean {
 function serializeToolOutput(output: unknown): string {
   if (output == null) return ''
   if (typeof output === 'string') return output
-  if (Array.isArray(output)) {
-    return output
-      .map((item) => {
-        if (item && typeof item === 'object' && 'type' in item) {
-          if (item.type === 'text' && 'value' in item) return String((item as { value: unknown }).value)
-          if (item.type === 'json' && 'value' in item) return JSON.stringify((item as { value: unknown }).value)
-          if (item.type === 'error-text' && 'value' in item) return `[Error] ${(item as { value: unknown }).value}`
-        }
-        return JSON.stringify(item)
-      })
-      .join('\n')
+  return serializeStructuredToolOutput(output)
+}
+
+function serializeStructuredToolOutput(output: unknown): string {
+  if (!Array.isArray(output)) return JSON.stringify(output, null, 2)
+
+  const parts: string[] = []
+  for (const item of output) {
+    if (item && typeof item === 'object' && 'type' in item) {
+      if (item.type === 'text' && 'value' in item) {
+        parts.push(`<tool_output type="text">\n${String((item as { value: unknown }).value)}\n</tool_output>`)
+        continue
+      }
+      if (item.type === 'json' && 'value' in item) {
+        parts.push(`<tool_output type="json">\n${JSON.stringify((item as { value: unknown }).value, null, 2)}\n</tool_output>`)
+        continue
+      }
+      if (item.type === 'error-text' && 'value' in item) {
+        parts.push(`<tool_output type="error">\n[Error] ${String((item as { value: unknown }).value)}\n</tool_output>`)
+        continue
+      }
+    }
+    parts.push(`<tool_output type="raw-json">\n${JSON.stringify(item, null, 2)}\n</tool_output>`)
   }
-  return JSON.stringify(output)
+
+  return parts.join('\n')
+}
+
+function approximateTokenCount(text: string): number {
+  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN)
+}
+
+function trimPromptToBudget(prompt: LanguageModelV2Prompt): LanguageModelV2Prompt {
+  const budget = Math.floor(DEFAULT_CONTEXT_LIMIT * PROMPT_CONTEXT_BUDGET_RATIO)
+  if (prompt.length <= 1) return prompt
+
+  const working = [...prompt]
+  let truncatedCount = 0
+
+  const buildCandidate = (candidate: LanguageModelV2Prompt) => buildStringPrompt(candidate, { truncate: false })
+
+  while (working.length > 1 && approximateTokenCount(buildCandidate(working)) > budget) {
+    const dropIdx = working.findIndex((msg) => msg.role !== 'system')
+    if (dropIdx === -1) break
+    working.splice(dropIdx, 1)
+    truncatedCount++
+  }
+
+  if (truncatedCount === 0) return working
+
+  const marker: LanguageModelV2Message = {
+    role: 'system',
+    content: `<truncated_history count="${truncatedCount}" />`,
+  }
+
+  const insertAt = working.findLastIndex((msg) => msg.role === 'system') + 1
+  working.splice(insertAt, 0, marker)
+  return working
 }
 
 /**
@@ -171,24 +221,29 @@ function serializeMessage(message: LanguageModelV2Message): string {
 }
 
 /** 纯文本模式：将完整对话历史序列化为结构化字符串 */
-export function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
+export function buildStringPrompt(
+  prompt: LanguageModelV2Prompt,
+  options: { truncate?: boolean } = {},
+): string {
+  const effectivePrompt = options.truncate !== false ? trimPromptToBudget(prompt) : prompt
+
   // 找到最后一条 user 消息的位置
   let lastUserIdx = -1
-  for (let i = prompt.length - 1; i >= 0; i--) {
-    if (prompt[i].role === 'user') { lastUserIdx = i; break }
+  for (let i = effectivePrompt.length - 1; i >= 0; i--) {
+    if (effectivePrompt[i].role === 'user') { lastUserIdx = i; break }
   }
 
   if (lastUserIdx === -1) return 'Hello'
 
   // 将最后一条 user 消息之前的历史序列化
-  const historyParts = serializePromptRange(prompt, 0, lastUserIdx)
+  const historyParts = serializePromptRange(effectivePrompt, 0, lastUserIdx)
 
   // 当前任务：最后一条 user 消息
-  const currentMsg = serializeMessage(prompt[lastUserIdx])
+  const currentMsg = serializeMessage(effectivePrompt[lastUserIdx])
 
   // 最后一条 user 之后可能还有 assistant/tool 消息（如 tool-call/tool-result），
   // 它们属于已发生的后续上下文，需按原始顺序保留，不能丢弃。
-  const trailingParts = serializePromptRange(prompt, lastUserIdx + 1, prompt.length)
+  const trailingParts = serializePromptRange(effectivePrompt, lastUserIdx + 1, effectivePrompt.length)
 
   if (historyParts.length > 0) {
     const segments = [
@@ -212,21 +267,24 @@ export function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
 /** 多模态模式：将完整消息历史转为 AsyncIterable<SDKUserMessage>（含图片） */
 async function* buildAsyncIterablePrompt(
   prompt: LanguageModelV2Prompt,
+  sessionId?: string,
 ): AsyncIterable<SDKUserMessage> {
+  const effectivePrompt = trimPromptToBudget(prompt)
+
   // 只产出最后一条 user 消息，避免 SDK 因多条用户消息而在第一条 result 后终止。
   // 历史（最后一条 user 消息之前的所有消息）序列化后作为 <conversation_history> 前缀注入。
   let lastUserIdx = -1
-  for (let i = prompt.length - 1; i >= 0; i--) {
-    if (prompt[i].role === 'user') { lastUserIdx = i; break }
+  for (let i = effectivePrompt.length - 1; i >= 0; i--) {
+    if (effectivePrompt[i].role === 'user') { lastUserIdx = i; break }
   }
   if (lastUserIdx === -1) return
 
   // 构建历史前缀（最后一条 user 之前的消息）
-  const historyParts = serializePromptRange(prompt, 0, lastUserIdx)
+  const historyParts = serializePromptRange(effectivePrompt, 0, lastUserIdx)
 
   // 最后一条 user 之后可能还有 assistant/tool 消息（如 tool-call/tool-result），
   // 它们属于已发生的后续上下文，需按原始顺序保留，不能丢弃。
-  const trailingParts = serializePromptRange(prompt, lastUserIdx + 1, prompt.length)
+  const trailingParts = serializePromptRange(effectivePrompt, lastUserIdx + 1, effectivePrompt.length)
 
   const contentBlocks: Array<
     | { type: 'text'; text: string }
@@ -242,7 +300,7 @@ async function* buildAsyncIterablePrompt(
   }
 
   // 处理最后一条 user 消息的内容块
-  const lastMsg = prompt[lastUserIdx]
+  const lastMsg = effectivePrompt[lastUserIdx]
   if (lastMsg.role === 'user' && Array.isArray(lastMsg.content)) {
     for (const part of lastMsg.content) {
       if (part.type === 'text') {
@@ -363,7 +421,7 @@ async function* buildAsyncIterablePrompt(
   if (contentBlocks.length > 0) {
     yield {
       type: 'user',
-      session_id: '',
+      session_id: sessionId ?? 'default',
       parent_tool_use_id: null,
       message: {
         role: 'user',

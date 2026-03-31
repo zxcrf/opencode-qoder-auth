@@ -116,6 +116,34 @@ describe('buildPromptFromOptions', () => {
     expect(prompt).toContain('[Error] file not found')
   })
 
+  it('tool 消息保留结构化 tool_output 标签，避免结果语义丢失', () => {
+    const prompt = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'tc-struct-1',
+              toolName: 'Read',
+              output: [
+                { type: 'text', value: 'line 1\nline 2' },
+                { type: 'json', value: { filePath: '/tmp/a.ts', lines: 2 } },
+              ],
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: '继续' }] },
+      ],
+    }) as string
+
+    expect(prompt).toContain('<tool_output type="text">')
+    expect(prompt).toContain('line 1')
+    expect(prompt).toContain('<tool_output type="json">')
+    expect(prompt).toContain('"filePath": "/tmp/a.ts"')
+  })
+
   it('图片 prompt 返回 AsyncIterable，并产出 image content block', async () => {
     const prompt = buildPromptFromOptions({
       ...BASE_OPTIONS,
@@ -282,6 +310,26 @@ describe('buildPromptFromOptions', () => {
     expect(content[1].type).toBe('image')
     // 第三块：当前问题文本
     expect(content[2].text).toBe('second question')
+  })
+
+  it('超长历史会截断并写入 <truncated_history> 标记', () => {
+    const prompt = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        { role: 'system', content: 'You are helpful.' },
+        ...Array.from({ length: 120 }, (_, idx) => ({
+          role: idx % 2 === 0 ? 'user' : 'assistant',
+          content: idx % 2 === 0
+            ? [{ type: 'text', text: `history-user-${idx}-${'x'.repeat(6000)}` }]
+            : [{ type: 'text', text: `history-assistant-${idx}-${'y'.repeat(6000)}` }],
+        })),
+        { role: 'user', content: [{ type: 'text', text: 'latest question' }] },
+      ],
+    }) as string
+
+    expect(prompt).toContain('<truncated_history count="')
+    expect(prompt).toContain('latest question')
+    expect(prompt).not.toContain('history-user-0-')
   })
 
   // === 回归测试：最后一条 user 之后的 assistant/tool 消息不应被丢弃 ===

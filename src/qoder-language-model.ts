@@ -510,9 +510,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
   async doStream(options: LanguageModelV2CallOptions): Promise<{
     stream: ReadableStream<LanguageModelV2StreamPart>
   }> {
-    const prompt = buildPromptFromOptions(options)
     const cliPath = resolveQoderCLI()
     const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath, this.providerOptions)
+    const prompt = buildPromptFromOptions(options, qoderOptions.sessionId)
 
     const streamTraceId = randomUUID().slice(0, 8)
     debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}`, streamTraceId)
