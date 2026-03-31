@@ -91,6 +91,12 @@ The plugin reads `~/.qoder/.auth/user` to detect login state. If not logged in, 
 - Replace the attachment fallback once the upstream SDK/CLI streaming path can consume image blocks directly.
 - Keep `npm run vendor:patch-sdk` in the SDK refresh workflow after updating `src/vendor/qoder-agent-sdk.mjs`.
 
+### Release Flow
+
+- Every push to `main` or `master` runs CI tests automatically.
+- When the push lands on `main` / `master`, CI also bumps the patch version automatically, publishes to npm, then commits `package.json` + `package-lock.json` and pushes the release tag back to the repository.
+- Configure `NPM_TOKEN` in GitHub Actions secrets before using this flow.
+
 ---
 
 ### Troubleshooting
@@ -193,6 +199,12 @@ opencode -m qoder/auto
 
 - 等上游 SDK / CLI 的 streaming path 能直接消费 image block 后，再移除当前 fallback。
 - 以后更新 `src/vendor/qoder-agent-sdk.mjs` 后，重新执行 `npm run vendor:patch-sdk` 以应用兼容补丁。
+
+### 发布流程
+
+- 每次推送到 `main` 或 `master` 都会自动执行 CI 测试。
+- 当代码进入 `main` / `master` 时，CI 会自动把版本号的 patch 位（Z 位）加 1，发布到 npm，并把更新后的 `package.json`、`package-lock.json` 以及对应 tag 提交回仓库。
+- 使用前需要先在 GitHub Actions Secrets 中配置 `NPM_TOKEN`。
 
 ---
 
