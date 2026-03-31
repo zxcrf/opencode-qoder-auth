@@ -956,7 +956,7 @@ ${stderrBuffer.join("\n")}`, "SubprocessTransport");
   createTempAttachmentFile(base64Data, mediaType) {
     const extension = mediaTypeToExtension(mediaType);
     const hash = createHash("sha256").update(base64Data).digest("hex").slice(0, 12);
-    const filePath = path.join(
+    const filePath = path2.join(
       os.tmpdir(),
       `qoder-sdk-attachment-${process.pid}-${Date.now()}-${hash}${extension}`
     );

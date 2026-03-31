@@ -1,5 +1,8 @@
 // @ts-nocheck
 import { describe, expect, it } from 'vitest'
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
+import { join } from 'node:path'
 import { buildPromptFromOptions } from '../src/prompt-builder.js'
 
 const BASE_OPTIONS = { inputFormat: 'prompt', mode: { type: 'regular' } }
@@ -443,5 +446,207 @@ describe('buildPromptFromOptions', () => {
     const historyEnd = prompt.indexOf('</conversation_history>')
     const secondQuestionPos = prompt.lastIndexOf('second question')
     expect(secondQuestionPos).toBeGreaterThan(historyEnd)
+  })
+
+  // === 本地路径 / file:// URL 兼容性测试 ===
+
+  /** 在系统临时目录写一张 1x1 最小 PNG，返回绝对路径 */
+  function createTempPng(name: string): string {
+    const filePath = join(tmpdir(), name)
+    // 最小合法 1x1 PNG（白色像素）
+    const pngBytes = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108020000009001' +
+      '2e0000000c49444154789c6260f8cfc00000000200016e21bc330000000049454e44ae426082',
+      'hex',
+    )
+    writeFileSync(filePath, pngBytes)
+    return filePath
+  }
+
+  it('file part 本地绝对路径字符串 → 产出 image content block', async () => {
+    const filePath = createTempPng('test-abs-path.png')
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: filePath, mediaType: 'image/png' },
+          { type: 'text', text: 'what is this?' },
+        ],
+      }],
+    })
+
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.type).toBe('base64')
+    expect(imageBlock.source.media_type).toBe('image/png')
+    expect(typeof imageBlock.source.data).toBe('string')
+    expect(imageBlock.source.data.length).toBeGreaterThan(0)
+  })
+
+  it('file part ~/... 风格路径 → 产出 image content block', async () => {
+    // 在用户 home 目录的临时子目录写文件，用 ~/... 路径引用
+    const subDir = join(homedir(), '.opencode-test-tmp')
+    mkdirSync(subDir, { recursive: true })
+    const absFilePath = join(subDir, 'test-tilde-path.png')
+    const pngBytes = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108020000009001' +
+      '2e0000000c49444154789c6260f8cfc00000000200016e21bc330000000049454e44ae426082',
+      'hex',
+    )
+    writeFileSync(absFilePath, pngBytes)
+    // 构造 ~/... 形式路径
+    const tildePath = '~/.opencode-test-tmp/test-tilde-path.png'
+
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: tildePath, mediaType: 'image/png' },
+          { type: 'text', text: 'tilde path image' },
+        ],
+      }],
+    })
+
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.type).toBe('base64')
+    expect(imageBlock.source.media_type).toBe('image/png')
+    expect(typeof imageBlock.source.data).toBe('string')
+    expect(imageBlock.source.data.length).toBeGreaterThan(0)
+  })
+
+  it('file part new URL("file:///...") → 产出 image content block', async () => {
+    const filePath = createTempPng('test-file-url.png')
+    const fileUrl = new URL(`file://${filePath}`)
+
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: fileUrl, mediaType: 'image/png' },
+          { type: 'text', text: 'file url image' },
+        ],
+      }],
+    })
+
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.type).toBe('base64')
+    expect(imageBlock.source.media_type).toBe('image/png')
+    expect(typeof imageBlock.source.data).toBe('string')
+    expect(imageBlock.source.data.length).toBeGreaterThan(0)
+  })
+
+  it('image part URL 对象（file: scheme）→ 产出 image content block', async () => {
+    const filePath = createTempPng('test-image-file-url.png')
+    const fileUrl = new URL(`file://${filePath}`)
+
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'image', image: fileUrl, mimeType: 'image/png' },
+          { type: 'text', text: 'image part file url' },
+        ],
+      }],
+    })
+
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.type).toBe('base64')
+    expect(imageBlock.source.media_type).toBe('image/png')
+    expect(typeof imageBlock.source.data).toBe('string')
+    expect(imageBlock.source.data.length).toBeGreaterThan(0)
+  })
+
+  it('image part 本地绝对路径字符串 → 产出 image content block', async () => {
+    const filePath = createTempPng('test-image-abs-path.png')
+
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'image', image: filePath, mimeType: 'image/png' },
+          { type: 'text', text: 'image part abs path' },
+        ],
+      }],
+    })
+
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.type).toBe('base64')
+    expect(imageBlock.source.media_type).toBe('image/png')
+    expect(typeof imageBlock.source.data).toBe('string')
+    expect(imageBlock.source.data.length).toBeGreaterThan(0)
+  })
+
+  it('file part 本地路径读取失败时静默跳过，不产出该 image block', async () => {
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: '/nonexistent/path/to/image.png', mediaType: 'image/png' },
+          { type: 'text', text: 'fallback text' },
+        ],
+      }],
+    })
+
+    // 有 image mediaType 的 file part → 走 AsyncIterable 路径
+    expect(typeof result).not.toBe('string')
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    // 读取失败跳过，只剩文本 block
+    const imageBlocks = content.filter((b: any) => b.type === 'image')
+    expect(imageBlocks).toHaveLength(0)
+    const textBlock = content.find((b: any) => b.type === 'text' && b.text === 'fallback text')
+    expect(textBlock).toBeDefined()
+  })
+
+  it('file part 有 mediaType 时以 part.mediaType 为准，不被扩展名推断覆盖', async () => {
+    // 验证有 mediaType 但扩展名与 mediaType 不同时，以 part.mediaType 为准
+    const filePath = createTempPng('test-ext-infer.png')
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [{
+        role: 'user',
+        content: [
+          { type: 'file', data: filePath, mediaType: 'image/webp' },
+        ],
+      }],
+    })
+
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    const content = (messages[0] as any).message.content
+    const imageBlock = content.find((b: any) => b.type === 'image')
+    // 以 part.mediaType 为准，而非扩展名推断的 image/png
+    expect(imageBlock.source.media_type).toBe('image/webp')
   })
 })

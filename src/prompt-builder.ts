@@ -1,5 +1,8 @@
 import type { LanguageModelV2CallOptions, LanguageModelV2Prompt, LanguageModelV2Message } from '@ai-sdk/provider'
 import type { SDKUserMessage } from './vendor/qoder-agent-sdk.mjs'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { extname, resolve } from 'node:path'
 
 /**
  * 从 opencode 传入的 LanguageModelV2CallOptions 中构造 Qoder query 的 prompt。
@@ -17,6 +20,46 @@ export function buildPromptFromOptions(
     return buildAsyncIterablePrompt(options.prompt)
   }
   return buildStringPrompt(options.prompt)
+}
+
+/**
+ * 将本地文件路径字符串（含 `~/...`、绝对路径）或 `file://` URL 读取为 base64 字符串。
+ * 若读取失败返回 null（防御性处理，不抛出）。
+ */
+function readLocalFileAsBase64(pathOrUrl: string): string | null {
+  try {
+    let filePath: string
+    if (pathOrUrl.startsWith('file://')) {
+      // file:// URL → 去掉协议前缀得到系统路径
+      filePath = decodeURIComponent(new URL(pathOrUrl).pathname)
+    } else if (pathOrUrl.startsWith('~/')) {
+      // ~/... 风格相对于 home 目录的路径
+      filePath = resolve(homedir(), pathOrUrl.slice(2))
+    } else {
+      // 普通绝对/相对路径
+      filePath = resolve(pathOrUrl)
+    }
+    const buf = readFileSync(filePath)
+    return buf.toString('base64')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 按文件扩展名推断图片 MIME 类型，默认 image/jpeg。
+ * 仅用于无法从 part 取到 mediaType/mimeType 时的回退推断。
+ */
+function inferMediaTypeFromPath(filePath: string): string {
+  const ext = extname(filePath).toLowerCase()
+  const map: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+  }
+  return map[ext] ?? 'image/jpeg'
 }
 
 /** 判断 prompt 中是否含有图片内容 */
@@ -198,23 +241,8 @@ async function* buildAsyncIterablePrompt(
         contentBlocks.push({ type: 'text', text: part.text })
       } else if (part.type === 'image') {
         const { image } = part
-        // AI SDK v2 image 可能是 URL、Uint8Array 或 base64 字符串
-        if (typeof image === 'string') {
-          // base64 data URL: "data:image/png;base64,..."
-          const match = image.match(/^data:([^;]+);base64,(.+)$/)
-          if (match) {
-            contentBlocks.push({
-              type: 'image',
-              source: { type: 'base64', media_type: match[1], data: match[2] },
-            })
-          } else {
-            // 裸 base64 字符串，假设 JPEG
-            contentBlocks.push({
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/jpeg', data: image },
-            })
-          }
-        } else if (image instanceof Uint8Array) {
+        // AI SDK v2 image 可能是 URL 对象、Uint8Array 或字符串（base64 / data URL / 本地路径）
+        if (image instanceof Uint8Array) {
           // 二进制数据，转 base64
           const base64 = Buffer.from(image).toString('base64')
           const mediaType = part.mimeType ?? 'image/jpeg'
@@ -222,6 +250,46 @@ async function* buildAsyncIterablePrompt(
             type: 'image',
             source: { type: 'base64', media_type: mediaType, data: base64 },
           })
+        } else if (image instanceof URL) {
+          if (image.protocol === 'file:') {
+            // file: URL 对象 → 读取本地文件
+            const filePath = decodeURIComponent(image.pathname)
+            const base64 = readLocalFileAsBase64(image.toString())
+            if (base64 !== null) {
+              const mediaType = part.mimeType ?? inferMediaTypeFromPath(filePath)
+              contentBlocks.push({
+                type: 'image',
+                source: { type: 'base64', media_type: mediaType, data: base64 },
+              })
+            }
+            // 其他协议（http/https）不支持，跳过
+          }
+        } else if (typeof image === 'string') {
+          // base64 data URL: "data:image/png;base64,..."
+          const dataUrlMatch = image.match(/^data:([^;]+);base64,(.+)$/)
+          if (dataUrlMatch) {
+            contentBlocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: dataUrlMatch[1], data: dataUrlMatch[2] },
+            })
+          } else if (image.startsWith('file://') || image.startsWith('/') || image.startsWith('~/')) {
+            // 本地路径字符串（含 file:// URL 字符串、绝对路径、~/... 路径）
+            const base64 = readLocalFileAsBase64(image)
+            if (base64 !== null) {
+              const pathForInfer = image.startsWith('file://') ? decodeURIComponent(new URL(image).pathname) : image
+              const mediaType = part.mimeType ?? inferMediaTypeFromPath(pathForInfer)
+              contentBlocks.push({
+                type: 'image',
+                source: { type: 'base64', media_type: mediaType, data: base64 },
+              })
+            }
+          } else {
+            // 裸 base64 字符串，假设 JPEG
+            contentBlocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: image },
+            })
+          }
         }
       } else if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) {
         // clipboard / --file 图片，AI SDK v2 以 type='file' 传入
@@ -231,23 +299,42 @@ async function* buildAsyncIterablePrompt(
         if (data instanceof Uint8Array) {
           base64Data = Buffer.from(data).toString('base64')
         } else if (typeof data === 'string') {
-          const match = data.match(/^data:([^;]+);base64,(.+)$/)
-          if (match) {
-            resolvedMediaType = match[1]
-            base64Data = match[2]
+          const dataUrlMatch = data.match(/^data:([^;]+);base64,(.+)$/)
+          if (dataUrlMatch) {
+            resolvedMediaType = dataUrlMatch[1]
+            base64Data = dataUrlMatch[2]
+          } else if (data.startsWith('file://') || data.startsWith('/') || data.startsWith('~/')) {
+            // 本地路径字符串（含 file:// URL 字符串、绝对路径、~/... 路径）
+            const base64 = readLocalFileAsBase64(data)
+            if (base64 === null) continue
+            base64Data = base64
+            // mediaType 优先用 part.mediaType，没有时按扩展名推断
+            if (!resolvedMediaType || !resolvedMediaType.startsWith('image/')) {
+              const pathForInfer = data.startsWith('file://') ? decodeURIComponent(new URL(data).pathname) : data
+              resolvedMediaType = inferMediaTypeFromPath(pathForInfer)
+            }
           } else {
             // 裸 base64 字符串
             base64Data = data
           }
         } else {
-          // URL 对象
+          // URL 对象（data URL 或 file: URL）
           const urlStr = (data as URL).toString()
-          const match = urlStr.match(/^data:([^;]+);base64,(.+)$/)
-          if (match) {
-            resolvedMediaType = match[1]
-            base64Data = match[2]
+          const dataUrlMatch = urlStr.match(/^data:([^;]+);base64,(.+)$/)
+          if (dataUrlMatch) {
+            resolvedMediaType = dataUrlMatch[1]
+            base64Data = dataUrlMatch[2]
+          } else if ((data as URL).protocol === 'file:') {
+            // file: URL 对象 → 读取本地文件
+            const base64 = readLocalFileAsBase64(urlStr)
+            if (base64 === null) continue
+            base64Data = base64
+            if (!resolvedMediaType || !resolvedMediaType.startsWith('image/')) {
+              const filePath = decodeURIComponent((data as URL).pathname)
+              resolvedMediaType = inferMediaTypeFromPath(filePath)
+            }
           } else {
-            continue // HTTP URL 暂不支持
+            continue // HTTP/HTTPS URL 暂不支持
           }
         }
         contentBlocks.push({
