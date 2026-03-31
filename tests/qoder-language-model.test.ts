@@ -1271,7 +1271,7 @@ describe('QoderLanguageModel', () => {
       })
     })
 
-    it('Agent 由 CLI 内部执行（provider-executed），不转发给 opencode', async () => {
+    it('Agent 映射为 task 并转发给 opencode', async () => {
       mockMessages.push({
         type: 'assistant',
         message: {
@@ -1295,9 +1295,14 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      // Agent 不应被转发为 function tool-call（它被 CLI 内部执行）
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
-      expect(toolCalls).toHaveLength(0)
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+      expect(JSON.parse((toolCalls[0] as any).input)).toEqual({
+        description: 'd',
+        prompt: 'p',
+        subagent_type: 'general-purpose',
+      })
     })
 
     it('ExitPlanMode 映射为 plan_exit', async () => {
@@ -1329,21 +1334,16 @@ describe('QoderLanguageModel', () => {
       expect((toolCalls[0] as any).toolName).toBe('plan_exit')
     })
 
-    it('query options 包含 agents 定义以支持 CLI subagent 派发', async () => {
+    it('query options 不再注入 qoder 内置 agents 定义', async () => {
       pushSuccessResult()
 
       const model = new QoderLanguageModel('auto')
       await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
 
-      expect(lastQueryParams?.options?.agents).toBeDefined()
-      expect(lastQueryParams.options.agents['general-purpose']).toBeDefined()
-      expect(lastQueryParams.options.agents['general-purpose'].description).toBeTruthy()
-      expect(lastQueryParams.options.agents['general-purpose'].prompt).toBeTruthy()
+      expect(lastQueryParams?.options?.agents).toBeUndefined()
     })
 
-    it('Task 由 CLI 内部执行（provider-executed），即使 opencode 有 task 函数工具也不转发', async () => {
-      // CLI 发出 Task 工具调用。即使 opencode 的 tools 中有 task，
-      // Task 也由 CLI 内部 subagent 机制执行，不转发给 opencode（避免 "Unknown agent type" 错误）
+    it('Task 在有 opencode task 工具时会转发，并映射 subagent_type', async () => {
       const agentBridge = await import('../src/agent-bridge.js')
       agentBridge.setAvailableAgentTypes(['explorer', 'fixer', 'designer', 'oracle', 'librarian'])
 
@@ -1370,16 +1370,22 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      // Task 不应被转发为 function tool-call（它被 CLI 内部 subagent 执行）
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
-      expect(toolCalls).toHaveLength(0)
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+      expect(JSON.parse((toolCalls[0] as any).input)).toEqual({
+        description: 'search',
+        prompt: 'find it',
+        subagent_type: 'explorer',
+      })
 
-      // 清理
       agentBridge.setAvailableAgentTypes([])
     })
 
-    it('Task（stream_event 路径）也由 CLI 内部执行，不转发给 opencode', async () => {
-      // stream_event 路径下 Task 也应该被当作 provider-executed
+    it('Task（stream_event 路径）在有 opencode task 工具时也会转发', async () => {
+      const agentBridge = await import('../src/agent-bridge.js')
+      agentBridge.setAvailableAgentTypes(['explorer', 'fixer'])
+
       mockMessages.push({
         type: 'stream_event',
         event: {
@@ -1411,34 +1417,55 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      // stream_event 路径下 Task 同样不应被转发
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
-      expect(toolCalls).toHaveLength(0)
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+      expect(JSON.parse((toolCalls[0] as any).input)).toEqual({
+        description: 'd',
+        prompt: 'p',
+        subagent_type: 'explorer',
+      })
 
-      // 不应有 tool-input-start/delta/end 事件（provider-executed 时跳过）
       const toolInputEvents = parts.filter((p) =>
         ['tool-input-start', 'tool-input-delta', 'tool-input-end'].includes(p.type)
       )
-      expect(toolInputEvents).toHaveLength(0)
+      expect(toolInputEvents).not.toHaveLength(0)
+
+      agentBridge.setAvailableAgentTypes([])
     })
 
-    it('Task/Agent 工具不影响其他 function 工具的正常转发', async () => {
-      // 确保删除 task/agent 不影响其他工具
+    it('Task 与其他 function 工具可以共存并分别正常转发', async () => {
       mockMessages.push({
         type: 'stream_event',
         event: {
           type: 'content_block_start',
           index: 0,
+          content_block: { type: 'tool_use', id: 'call_task_coexist', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"d","prompt":"p","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 1,
           content_block: { type: 'tool_use', id: 'call_bash_coexist', name: 'bash' },
         },
       })
       mockMessages.push({
         type: 'stream_event',
-        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+        event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
       })
       mockMessages.push({
         type: 'stream_event',
-        event: { type: 'content_block_stop', index: 0 },
+        event: { type: 'content_block_stop', index: 1 },
       })
       pushSuccessResult()
 
@@ -1456,10 +1483,125 @@ describe('QoderLanguageModel', () => {
         ).stream,
       )
 
-      // bash 应正常转发（它不是 task/agent）
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      const taskCall = toolCalls.find((p) => (p as any).toolName === 'task')
+      const bashCall = toolCalls.find((p) => (p as any).toolName === 'bash')
+      expect(toolCalls).toHaveLength(2)
+      expect(taskCall).toBeDefined()
+      expect(JSON.parse((taskCall as any).input)).toEqual({
+        description: 'd',
+        prompt: 'p',
+        subagent_type: 'general-purpose',
+      })
+      expect(bashCall).toBeDefined()
+    })
+
+    it('Task 在没有 opencode task 工具时不会转发给 opencode', async () => {
+      mockMessages.push({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_task_fallback', name: 'Task', input: { description: 'search', prompt: 'find it', subagent_type: 'general-purpose' } },
+          ],
+        },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(0)
+    })
+
+    it('Agent 不依赖 qoder 内置 agents，直接作为 opencode task 转发', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_agent_stream', name: 'Agent' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"d","prompt":"p","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
       const toolCalls = parts.filter((p) => p.type === 'tool-call')
       expect(toolCalls).toHaveLength(1)
-      expect((toolCalls[0] as any).toolName).toBe('bash')
+      expect((toolCalls[0] as any).toolName).toBe('task')
+      expect(JSON.parse((toolCalls[0] as any).input)).toEqual({
+        description: 'd',
+        prompt: 'p',
+        subagent_type: 'general-purpose',
+      })
+      expect(lastQueryParams?.options?.agents).toBeUndefined()
+    })
+
+    // ── agent-bridge：subagent_type 映射逻辑 ───────────────────────────────
+
+    it('agent-bridge 将 CLI 标准类型映射为 oh-my-opencode-slim 可用类型', async () => {
+      const { setAvailableAgentTypes, mapSubagentType } = await import('../src/agent-bridge.js')
+      setAvailableAgentTypes(['explorer', 'fixer', 'designer', 'oracle', 'librarian'])
+
+      // general-purpose → explorer（语义类别 explore）
+      expect(mapSubagentType('general-purpose')).toBe('explorer')
+      // code-reviewer → fixer（语义类别 fix）
+      expect(mapSubagentType('code-reviewer')).toBe('fixer')
+      // design-agent → designer（语义类别 design）
+      expect(mapSubagentType('design-agent')).toBe('designer')
+
+      // 清理
+      setAvailableAgentTypes([])
+    })
+
+    it('agent-bridge 对已在可用类型中的 subagent_type 原样返回', async () => {
+      const { setAvailableAgentTypes, mapSubagentType } = await import('../src/agent-bridge.js')
+      setAvailableAgentTypes(['explorer', 'fixer', 'designer'])
+
+      expect(mapSubagentType('explorer')).toBe('explorer')
+      expect(mapSubagentType('fixer')).toBe('fixer')
+
+      // 清理
+      setAvailableAgentTypes([])
+    })
+
+    it('agent-bridge 无可用类型配置时 subagent_type 原样透传', async () => {
+      const { setAvailableAgentTypes, mapSubagentType } = await import('../src/agent-bridge.js')
+      // 模拟标准 opencode 环境：不设置可用类型
+      setAvailableAgentTypes([])
+
+      expect(mapSubagentType('general-purpose')).toBe('general-purpose')
+      expect(mapSubagentType('code-reviewer')).toBe('code-reviewer')
     })
 
     // ── finishReason：有 tool-call 时应为 'tool-calls' ─────────────────────
@@ -2079,6 +2221,59 @@ describe('QoderLanguageModel', () => {
       )
 
       // pendingToolCalls 未清空（size=1）→ finishReason 必须为 tool-calls，opencode 继续执行
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish).toBeDefined()
+      expect((finish as any).finishReason).toBe('tool-calls')
+    })
+
+    it('[回归] task 子代理 tool-call 后即使同一 query 收到回放 tool_result，finishReason 仍为 tool-calls', async () => {
+      mockMessages.push({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'call_subagent_wait_001', name: 'Task' },
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"description":"Explore","prompt":"Inspect project","subagent_type":"general-purpose"}' } },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      })
+      mockMessages.push({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_subagent_wait_001', content: 'Tool execution aborted' },
+          ],
+        },
+      })
+      mockMessages.push({
+        type: 'stream_event',
+        event: { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      })
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('auto')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              tools: [
+                { type: 'function', name: 'task', description: 'Task', inputSchema: { type: 'object', properties: {} } },
+              ],
+            }),
+          )
+        ).stream,
+      )
+
+      const toolCalls = parts.filter((p) => p.type === 'tool-call')
+      expect(toolCalls).toHaveLength(1)
+      expect((toolCalls[0] as any).toolName).toBe('task')
+
       const finish = parts.find((p) => p.type === 'finish')
       expect(finish).toBeDefined()
       expect((finish as any).finishReason).toBe('tool-calls')

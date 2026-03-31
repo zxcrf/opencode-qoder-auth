@@ -140,14 +140,14 @@ function resolveQoderCLI(): string | undefined {
 /**
  * CLI 工具名 → opencode 工具名 的标准化映射：
  *   - 大小写：Read → read, Bash → bash
- *   - CLI 内置特殊名：AskUserQuestion → question
- *   - Agent 不映射 — CLI 内部执行（需配合 agents 配置），避免与 opencode Task 双重派发
+ *   - CLI 内置特殊名：AskUserQuestion → question, Agent → task
  *   - MCP proxy 格式：mcp__context7__resolve-library-id → context7_resolve-library-id
  *     （CLI 用双下划线 mcp__{server}__{tool}，opencode 用单下划线 {server}_{tool}）
  */
 function normalizeToolName(name: string): string {
   const lower = name.toLowerCase()
   if (lower === 'askuserquestion') return 'question'
+  if (lower === 'agent') return 'task'
   if (lower === 'exitplanmode') return 'plan_exit'
   if (lower === 'str_replace_based_edit_tool') return 'edit'
   // CLI MCP proxy 格式：mcp__{serverName}__{toolName} → {serverName}_{toolName}
@@ -303,25 +303,6 @@ type QoderProviderFactoryOptions = QoderProviderOptions & {
 
 const DEFAULT_QODER_MAX_BUFFER_SIZE = 8 * 1024 * 1024
 
-// ── CLI subagent 定义 — 让 qodercli 知道如何派发 Agent 工具 ──────────────────
-// 如果不传 agents，CLI 在遇到 Agent tool_use 时会报
-// "Unknown agent type: xxx is not a valid agent type"。
-// 这些定义只需要最小的 description + prompt，tools 留空让 subagent 继承主 agent 的全部工具。
-const DEFAULT_SUBAGENT_DEFINITIONS: Record<string, { description: string; prompt: string }> = {
-  'general-purpose': {
-    description: 'General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.',
-    prompt: 'You are a helpful assistant. Complete the task described by the user. Be thorough and provide clear results.',
-  },
-  'code-reviewer': {
-    description: 'Review code changes with a focus on correctness, security, performance, and test impact.',
-    prompt: 'You are a code reviewer. Review the code and provide feedback on correctness, security, and performance.',
-  },
-  'task-executor': {
-    description: 'Execute implementation tasks systematically while maintaining strict quality standards.',
-    prompt: 'You are a task executor. Implement the specified tasks systematically and verify your work.',
-  },
-}
-
 function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
   modelId: string,
@@ -336,7 +317,6 @@ function buildQoderQueryOptions(
   sessionId: string
   cwd: string
   env: Record<string, string>
-  agents: Record<string, { description: string; prompt: string }>
   pathToQoderCLIExecutable?: string
   mcpServers?: Record<string, QoderMcpServerConfig>
   extraArgs?: Record<string, string | null>
@@ -374,7 +354,6 @@ function buildQoderQueryOptions(
     sessionId: randomUUID(),
     cwd: process.cwd(),
     env: buildQoderQueryEnv(),
-    agents: DEFAULT_SUBAGENT_DEFINITIONS,
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
     ...(hasExtraArgs ? { extraArgs: baseExtraArgs } : {}),
@@ -550,11 +529,6 @@ export class QoderLanguageModel implements LanguageModelV2 {
         .filter((t) => t.type === 'function')
         .map((t) => normalizeToolName(t.name))
     )
-    // CLI 的 Task/Agent 工具由 CLI 内部 subagent 机制执行，不转发给 opencode。
-    // 虽然 opencode 也有 task 函数工具，但 CLI 的 Task 对应的是 CLI 内部的 subagent 派发。
-    // 如果转发会导致 opencode 报 "Unknown agent type" 错误（opencode 的 subagent 注册表与 CLI 不同）。
-    functionToolNames.delete('task')
-    functionToolNames.delete('agent')
     debugLog(`doStream() hasTools=${hasTools}, functionToolNames=[${[...functionToolNames].join(',')}]`)
 
     // 每次 query 独立的 AbortController，用于中断后台 qodercli 进程
@@ -605,6 +579,10 @@ export class QoderLanguageModel implements LanguageModelV2 {
 
         // tool_use_id → {toolName, input, isProviderExecuted} 映射（用于 tool_result 时查找）
         const pendingToolCalls = new Map<string, { toolName: string; input: string; isProviderExecuted: boolean }>()
+
+        // 对于 task 子代理工具，Qoder/SDK 可能在同一 query 中回放 tool_result，
+        // 但 opencode 仍需继续等待真正的子代理执行结果，因此不能立即视为完成。
+        const waitForExternalCompletionToolNames = new Set(['task'])
 
         // 是否向 opencode 发出了 function tool-call（决定 finishReason）
         let emittedFunctionToolCall = false
@@ -785,9 +763,16 @@ export class QoderLanguageModel implements LanguageModelV2 {
                 debugLog(`tool_result: tool_use_id=${block.tool_use_id}, found=${!!toolCall}, toolName=${toolCall?.toolName}, isProviderExecuted=${toolCall?.isProviderExecuted}`)
                 if (!toolCall) continue
 
-                // CLI 内置工具（isProviderExecuted=true）的结果不转发给 opencode
-                // function 工具（isProviderExecuted=false）由 opencode 执行，CLI 也会发 tool_result 但不需转发
-                pendingToolCalls.delete(block.tool_use_id)
+                // CLI 内置工具（isProviderExecuted=true）的结果由 provider 自己消费，
+                // 收到 tool_result 后可在同一 query 内清空 pending。
+                // opencode function 工具（isProviderExecuted=false）必须交给 opencode 执行，
+                // 即使 SDK 在同一 query 中又回放了 tool_result，也不能在这里清空 pending，
+                // 否则会把 finishReason 错判成 stop，导致上层不再等待真正的工具/子代理结果。
+                if (toolCall.isProviderExecuted) {
+                  pendingToolCalls.delete(block.tool_use_id)
+                } else if (!waitForExternalCompletionToolNames.has(toolCall.toolName)) {
+                  pendingToolCalls.delete(block.tool_use_id)
+                }
               }
 
             // ── result：会话结束 ────────────────────────────────────────
@@ -829,8 +814,8 @@ export class QoderLanguageModel implements LanguageModelV2 {
               } else {
                 const usage = m.usage as { input_tokens: number; output_tokens: number } | undefined
                 // 只有确实仍有待处理的 function tool call 时才返回 tool-calls。
-                // 若 stop_reason=tool_use 但同一 query 内 tool_result 已到达、pendingToolCalls 已清空，
-                // 则应返回 stop，避免 opencode 误判为还需要继续执行而陷入无限循环。
+                // 注意：对于由 opencode 执行的 function 工具，同一 query 内即使看到了 SDK 回放的 tool_result，
+                // 也不会在 provider 内清空 pending；必须让上层继续等待真实工具结果并发起下一轮。
                 const hasOutstandingFunctionToolCalls = emittedFunctionToolCall && outstandingToolCallCount > 0
                 const mappedFinishReason: LanguageModelV2FinishReason =
                   hasOutstandingFunctionToolCalls ? 'tool-calls' : 'stop'
