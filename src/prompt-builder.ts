@@ -130,17 +130,30 @@ export function buildStringPrompt(prompt: LanguageModelV2Prompt): string {
   if (lastUserIdx === -1) return 'Hello'
 
   // 将最后一条 user 消息之前的历史序列化
-  const historyParts: string[] = []
-  for (let i = 0; i < lastUserIdx; i++) {
-    const s = serializeMessage(prompt[i])
-    if (s) historyParts.push(s)
-  }
+  const historyParts = serializePromptRange(prompt, 0, lastUserIdx)
 
   // 当前任务：最后一条 user 消息
   const currentMsg = serializeMessage(prompt[lastUserIdx])
 
+  // 最后一条 user 之后可能还有 assistant/tool 消息（如 tool-call/tool-result），
+  // 它们属于已发生的后续上下文，需按原始顺序保留，不能丢弃。
+  const trailingParts = serializePromptRange(prompt, lastUserIdx + 1, prompt.length)
+
   if (historyParts.length > 0) {
-    return `<conversation_history>\n${historyParts.join('\n\n')}\n</conversation_history>\n\n${currentMsg}`
+    const segments = [
+      `<conversation_history>\n${historyParts.join('\n\n')}\n</conversation_history>`,
+      currentMsg,
+    ]
+    if (trailingParts.length > 0) {
+      segments.push(`<conversation_continuation>\n${trailingParts.join('\n\n')}\n</conversation_continuation>`)
+    }
+    return segments.filter(Boolean).join('\n\n')
+  }
+  if (trailingParts.length > 0) {
+    return [
+      currentMsg,
+      `<conversation_continuation>\n${trailingParts.join('\n\n')}\n</conversation_continuation>`,
+    ].filter(Boolean).join('\n\n')
   }
   return currentMsg || 'Hello'
 }
@@ -157,12 +170,12 @@ async function* buildAsyncIterablePrompt(
   }
   if (lastUserIdx === -1) return
 
-  // 构建历史前缀
-  const historyParts: string[] = []
-  for (let i = 0; i < lastUserIdx; i++) {
-    const s = serializeMessage(prompt[i])
-    if (s) historyParts.push(s)
-  }
+  // 构建历史前缀（最后一条 user 之前的消息）
+  const historyParts = serializePromptRange(prompt, 0, lastUserIdx)
+
+  // 最后一条 user 之后可能还有 assistant/tool 消息（如 tool-call/tool-result），
+  // 它们属于已发生的后续上下文，需按原始顺序保留，不能丢弃。
+  const trailingParts = serializePromptRange(prompt, lastUserIdx + 1, prompt.length)
 
   const contentBlocks: Array<
     | { type: 'text'; text: string }
@@ -245,6 +258,13 @@ async function* buildAsyncIterablePrompt(
     }
   }
 
+  if (trailingParts.length > 0) {
+    contentBlocks.push({
+      type: 'text',
+      text: `<conversation_continuation>\n${trailingParts.join('\n\n')}\n</conversation_continuation>`,
+    })
+  }
+
   if (contentBlocks.length > 0) {
     yield {
       type: 'user',
@@ -256,4 +276,17 @@ async function* buildAsyncIterablePrompt(
       },
     } as SDKUserMessage
   }
+}
+
+function serializePromptRange(
+  prompt: LanguageModelV2Prompt,
+  start: number,
+  end: number,
+): string[] {
+  const parts: string[] = []
+  for (let i = start; i < end; i++) {
+    const serialized = serializeMessage(prompt[i])
+    if (serialized) parts.push(serialized)
+  }
+  return parts
 }

@@ -281,6 +281,148 @@ describe('buildPromptFromOptions', () => {
     expect(content[2].text).toBe('second question')
   })
 
+  // === 回归测试：最后一条 user 之后的 assistant/tool 消息不应被丢弃 ===
+
+  it('[回归] 纯文本路径：最后一条 user 后的 tool-call/tool-result 应保留在历史中', () => {
+    // 场景：user 发起请求 → assistant 发起 tool-call → tool 返回结果
+    // 此时模型被再次调用，prompt 末尾是 tool 消息而非 user 消息，
+    // 但最后一条 user 消息之后的 assistant/tool 不应被丢弃。
+    const prompt = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        { role: 'user', content: [{ type: 'text', text: 'list files please' }] },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'tc-reg-1',
+              toolName: 'Bash',
+              input: { command: 'ls /tmp' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'tc-reg-1',
+              toolName: 'Bash',
+              output: [{ type: 'text', value: 'a.txt\nb.txt' }],
+            },
+          ],
+        },
+        // 注意：此处没有再追加新的 user 消息，最后一条 user 是 "list files please"
+      ],
+    }) as string
+
+    // 最后一条 user 消息应作为当前任务
+    expect(prompt).toContain('list files please')
+    // assistant 的 tool-call 不能被丢弃
+    expect(prompt).toContain('<tool_call id="tc-reg-1" name="Bash">')
+    expect(prompt).toContain('"command":"ls /tmp"')
+    expect(prompt).toContain('</tool_call>')
+    // tool-result 不能被丢弃
+    expect(prompt).toContain('<tool_result id="tc-reg-1" name="Bash">')
+    expect(prompt).toContain('a.txt')
+    expect(prompt).toContain('b.txt')
+    expect(prompt).toContain('</tool_result>')
+    // 后缀消息必须作为 continuation 保留，且顺序在当前 user 之后
+    expect(prompt).toContain('<conversation_continuation>')
+    const currentMsgPos = prompt.indexOf('list files please')
+    const continuationStart = prompt.indexOf('<conversation_continuation>')
+    const continuationEnd = prompt.indexOf('</conversation_continuation>')
+    const toolCallPos = prompt.indexOf('<tool_call id="tc-reg-1"')
+    const toolResultPos = prompt.indexOf('<tool_result id="tc-reg-1"')
+    expect(continuationStart).toBeGreaterThan(currentMsgPos)
+    expect(toolCallPos).toBeGreaterThan(continuationStart)
+    expect(toolCallPos).toBeLessThan(continuationEnd)
+    expect(toolResultPos).toBeGreaterThan(continuationStart)
+    expect(toolResultPos).toBeLessThan(continuationEnd)
+  })
+
+  it('[回归] 多模态路径：带图片的最后 user 后有 tool-call/tool-result，应保留且只产出 1 条 SDKUserMessage', async () => {
+    // 场景：多模态对话中，用户上传图片提问后，assistant 调用了工具并拿到结果，
+    // 随后模型被再次调用。此时最后一条 user 消息含图片，
+    // 其后的 assistant tool-call + tool-result 不应被丢弃，且整体只能产出 1 条 SDKUserMessage。
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        { role: 'system', content: 'You are a vision assistant.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'image', image: `data:image/png;base64,${b64}`, mimeType: 'image/png' },
+            { type: 'text', text: 'what is in this image?' },
+          ],
+        },
+        // 最后一条 user 之后：assistant 发起 tool-call，tool 返回结果
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'tc-mm-1',
+              toolName: 'Describe',
+              input: { detail: 'high' },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'tc-mm-1',
+              toolName: 'Describe',
+              output: [{ type: 'text', value: 'A red circle on white background.' }],
+            },
+          ],
+        },
+      ],
+    })
+
+    // 必须走 AsyncIterable 路径（因为有图片）
+    expect(typeof result).not.toBe('string')
+
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) {
+      messages.push(msg)
+    }
+
+    // 只产出 1 条 SDKUserMessage
+    expect(messages).toHaveLength(1)
+
+    const content = (messages[0] as any).message.content as Array<{ type: string; text?: string; source?: unknown }>
+
+    // 第一块：<conversation_history> 文本前缀，包含 system 历史
+    expect(content[0].type).toBe('text')
+    expect(content[0].text).toContain('<conversation_history>')
+    expect(content[0].text).toContain('<system>')
+    expect(content[0].text).toContain('You are a vision assistant.')
+
+    // 第二块：图片
+    expect(content[1].type).toBe('image')
+    expect((content[1] as any).source).toEqual({
+      type: 'base64',
+      media_type: 'image/png',
+      data: b64,
+    })
+
+    // 第三块：当前问题文本
+    expect(content[2].type).toBe('text')
+    expect(content[2].text).toBe('what is in this image?')
+
+    // 第四块：后缀 continuation，保留 tool-call/tool-result，且顺序在当前 user 内容之后
+    expect(content[3].type).toBe('text')
+    expect(content[3].text).toContain('<conversation_continuation>')
+    expect(content[3].text).toContain('<tool_call id="tc-mm-1" name="Describe">')
+    expect(content[3].text).toContain('<tool_result id="tc-mm-1" name="Describe">')
+    expect(content[3].text).toContain('A red circle on white background.')
+  })
+
   it('buildStringPrompt 多轮对话：历史包在 <conversation_history>，末条 user 消息作为主任务', () => {
     const prompt = buildPromptFromOptions({
       ...BASE_OPTIONS,
