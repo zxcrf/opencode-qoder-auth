@@ -649,4 +649,140 @@ describe('buildPromptFromOptions', () => {
     // 以 part.mediaType 为准，而非扩展名推断的 image/png
     expect(imageBlock.source.media_type).toBe('image/webp')
   })
+
+  // === 回归测试：历史序列化时保留图片占位（修复"后续轮次模型误以为没聊过图片"的问题）===
+
+  it('[回归] 历史中 user 只有 image part，后续文本轮 <conversation_history> 应包含图片占位', async () => {
+    // 场景：第一轮用户发了一张图；第二轮用户问"刚刚聊了什么"
+    // 期望：历史中第一轮 user 消息含 [Image attached: image/png] 占位，不被静默丢弃
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              image: 'data:image/png;base64,abc123==',
+              mimeType: 'image/png',
+            },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'This is a red circle.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'what did we just chat about?' }] },
+      ],
+    }) as string
+
+    // 此轮无图片 → 应走字符串路径
+    expect(typeof result).toBe('string')
+    expect(result).toContain('<conversation_history>')
+    // 历史中第一轮 user 图片占位必须保留
+    expect(result).toContain('[Image attached: image/png]')
+    // 当前问题在历史之后
+    const historyEnd = result.indexOf('</conversation_history>')
+    const currentPos = result.lastIndexOf('what did we just chat about?')
+    expect(historyEnd).toBeGreaterThan(-1)
+    expect(currentPos).toBeGreaterThan(historyEnd)
+  })
+
+  it('[回归] 历史中 user 为 file(image/png) part，后续文本轮也保留图片占位', async () => {
+    // 场景：第一轮用户通过剪贴板/--file 发了一张图片；第二轮纯文本问问题
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe'
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            { type: 'file', data: b64, mediaType: 'image/png' },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'I see a small PNG image.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'describe what you see' }] },
+      ],
+    }) as string
+
+    expect(typeof result).toBe('string')
+    expect(result).toContain('<conversation_history>')
+    // file(image/*) 历史占位必须保留
+    expect(result).toContain('[Image attached: image/png]')
+    expect(result).toContain('describe what you see')
+  })
+
+  it('[回归] 历史中 user 为 image + text，文本和图片占位都保留', async () => {
+    // 场景：第一轮用户同时附上图片和文字说明；第二轮纯文本跟进
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              image: 'data:image/jpeg;base64,/9j/4AAQSkZJRgAB',
+              mimeType: 'image/jpeg',
+            },
+            { type: 'text', text: 'look at this chart' },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'The chart shows an upward trend.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'can you summarize again?' }] },
+      ],
+    }) as string
+
+    expect(typeof result).toBe('string')
+    expect(result).toContain('<conversation_history>')
+    // 图片占位和文本都必须保留
+    expect(result).toContain('[Image attached: image/jpeg]')
+    expect(result).toContain('look at this chart')
+    expect(result).toContain('can you summarize again?')
+  })
+
+  it('[回归] 多模态首轮（图片）→ 文本次轮：AsyncIterable 路径的历史中保留图片占位', async () => {
+    // 场景：第一轮有图片走 AsyncIterable；历史序列化的 <conversation_history> 不应遗失图片语义
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+    const result = buildPromptFromOptions({
+      ...BASE_OPTIONS,
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', image: `data:image/png;base64,${b64}`, mimeType: 'image/png' },
+            { type: 'text', text: 'what is in this image?' },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'A small pixel.' }] },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              image: `data:image/png;base64,${b64}`,
+              mimeType: 'image/png',
+            },
+            { type: 'text', text: 'same image again, any new detail?' },
+          ],
+        },
+      ],
+    })
+
+    // 当前轮有图片 → AsyncIterable 路径
+    expect(typeof result).not.toBe('string')
+
+    const messages: unknown[] = []
+    for await (const msg of result as AsyncIterable<unknown>) messages.push(msg)
+    expect(messages).toHaveLength(1)
+
+    const content = (messages[0] as any).message.content as Array<{ type: string; text?: string }>
+    // 历史块（第一块）必须包含第一轮的图片占位 + 文本
+    expect(content[0].type).toBe('text')
+    expect(content[0].text).toContain('<conversation_history>')
+    expect(content[0].text).toContain('[Image attached: image/png]')
+    expect(content[0].text).toContain('what is in this image?')
+    expect(content[0].text).toContain('A small pixel.')
+    // 当前轮图片 block 是真实 base64，不是占位
+    const imageBlock = content.find((b) => b.type === 'image') as any
+    expect(imageBlock).toBeDefined()
+    expect(imageBlock.source.data).toBe(b64)
+  })
 })

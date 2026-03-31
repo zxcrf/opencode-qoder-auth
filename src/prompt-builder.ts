@@ -62,15 +62,17 @@ function inferMediaTypeFromPath(filePath: string): string {
   return map[ext] ?? 'image/jpeg'
 }
 
-/** 判断 prompt 中是否含有图片内容 */
+/** 判断 prompt 中是否含有图片内容（只检测最后一条 user 消息，历史轮次不触发多模态路径） */
 function hasImageContent(prompt: LanguageModelV2Prompt): boolean {
-  for (const message of prompt) {
-    if (message.role === 'user' && Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part.type === 'image') return true
-        if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) return true
-      }
-    }
+  // 找到最后一条 user 消息
+  let lastUserMsg: LanguageModelV2Message | null = null
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    if (prompt[i].role === 'user') { lastUserMsg = prompt[i]; break }
+  }
+  if (!lastUserMsg || !Array.isArray(lastUserMsg.content)) return false
+  for (const part of lastUserMsg.content) {
+    if (part.type === 'image') return true
+    if (part.type === 'file' && typeof part.mediaType === 'string' && part.mediaType.startsWith('image/')) return true
   }
   return false
 }
@@ -118,8 +120,14 @@ function serializeMessage(message: LanguageModelV2Message): string {
       for (const part of message.content) {
         if (part.type === 'text') {
           parts.push(part.text)
+        } else if (part.type === 'image') {
+          // 历史序列化时保留图片占位，让模型知道此轮有图片附件
+          const mediaType = (part as { mimeType?: string }).mimeType ?? 'image'
+          parts.push(`[Image attached: ${mediaType}]`)
+        } else if (part.type === 'file' && typeof (part as { mediaType?: string }).mediaType === 'string' && ((part as { mediaType: string }).mediaType).startsWith('image/')) {
+          // file part 图片类型（含剪贴板/--file 等来源），同样注入占位
+          parts.push(`[Image attached: ${(part as { mediaType: string }).mediaType}]`)
         }
-        // 图片在 buildStringPrompt 路径下不处理（由 hasImageContent 检测后走另一路径）
       }
       return parts.join('\n')
     }
