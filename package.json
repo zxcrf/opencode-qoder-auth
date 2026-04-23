@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-auth",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "opencode auth plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "dist/index.js",
