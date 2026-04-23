@@ -1,4 +1,4 @@
-# opencode-qoder-plugin
+# opencode-qoder-auth
 
 [English](#english) | [中文](#中文)
 
@@ -29,11 +29,13 @@ npm install -g opencode-ai
 
 ### Installation
 
+Dependencies are fully vendored for Qoder SDK access, so `npm install`, `pnpm install`, and `bun install` should not need to fetch `@ali/qoder-agent-sdk` from the public npm registry.
+
 Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-qoder-plugin"]
+  "plugin": ["opencode-qoder-auth"]
 }
 ```
 
@@ -142,7 +144,7 @@ npm install -g opencode-ai
 
 ```json
 {
-  "plugin": ["opencode-qoder-plugin"]
+  "plugin": ["opencode-qoder-auth"]
 }
 ```
 

@@ -1,7 +1,7 @@
 {
-  "name": "opencode-qoder-plugin",
-  "version": "0.2.4",
-  "description": "opencode plugin — Qoder AI models with bundled SDK, zero config required",
+  "name": "opencode-qoder-auth",
+  "version": "0.1.0",
+  "description": "opencode auth plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "index.ts",
   "exports": {
@@ -23,15 +23,16 @@
     "@types/node": "^20.4.5",
     "vitest": "^4.0.15"
   },
-  "author": "yee.wang <wyy.xb@qq.com>",
+  "author": "zxcrf",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yee94/opencode-qoder-provider.git"
+    "url": "https://github.com/zxcrf/opencode-qoder-auth.git"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "opencode-auth",
     "qoder",
     "ai",
     "plugin"

@@ -1,11 +1,11 @@
 # AGENTS.md
 
-This is **opencode-qoder-plugin** — an [opencode](https://opencode.ai) plugin that injects Qoder AI models via a `config` hook. No manual provider configuration needed by users.
+This is **opencode-qoder-auth** — an [opencode](https://opencode.ai) plugin that injects Qoder AI models via a `config` hook. No manual provider configuration needed by users.
 
 ## Project Structure
 
 ```
-opencode-qoder-plugin/
+opencode-qoder-auth/
 ├── index.ts                     # Plugin entry — config hook + auth hook
 ├── provider.ts                  # Exports createQoderProvider() (opencode npm loader entry)
 ├── src/
@@ -26,7 +26,7 @@ opencode-qoder-plugin/
 
 ## Key Design Decisions
 
-- **Plugin, not provider config** — `index.ts` uses the `config` hook to inject `provider.qoder` automatically. Users only need `"plugin": ["opencode-qoder-plugin"]` in their `opencode.json`.
+- **Plugin, not provider config** — `index.ts` uses the `config` hook to inject `provider.qoder` automatically. Users only need `"plugin": ["opencode-qoder-auth"]` in their `opencode.json`.
 - **Auth hook** — checks `~/.qoder/.auth/user` for login state. If absent, surfaces a prompt telling users to run `qoder login`.
 - **Vendored SDK** — `src/vendor/qoder-agent-sdk.mjs` is a bundled copy of `@ali/qoder-agent-sdk` (internal registry). Do not replace it without testing the full streaming pipeline.
 - **Model merging** — builtin models from `src/models.ts` are injected first; any `provider.qoder.models` overrides in the user's `opencode.json` take precedence.
