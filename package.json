@@ -1,9 +1,16 @@
 {
   "name": "opencode-qoder-auth",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "description": "opencode auth plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
   "main": "index.ts",
+  "files": [
+    "index.ts",
+    "provider.ts",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": "./index.ts",
     "./provider": "./provider.ts"
@@ -15,7 +22,6 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^3.0.8",
-    "@ali/qoder-agent-sdk": "^0.0.45",
     "@opencode-ai/plugin": "^1.2.27",
     "zod": "^3.22.4"
   },

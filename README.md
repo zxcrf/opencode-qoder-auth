@@ -39,7 +39,7 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-That's it. The plugin automatically injects the `qoder` provider and all 11 models — no `provider` block needed.
+OpenCode installs npm plugins automatically on startup. Once this package name is present in `plugin`, the plugin injects the `qoder` provider and all 11 models — no `provider` block needed.
 
 ---
 
@@ -148,7 +148,7 @@ npm install -g opencode-ai
 }
 ```
 
-就这样。插件会自动注入完整的 `qoder` provider 和全部 11 个模型，**无需手写任何 `provider` 配置**。
+OpenCode 会在启动时自动安装 `plugin` 数组里的 npm 插件。只要这里写上 `opencode-qoder-auth`，插件就会自动注入完整的 `qoder` provider 和全部 11 个模型，**无需手写任何 `provider` 配置**。
 
 ---
 

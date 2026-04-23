@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] - 2026-04-23
+
+### 🔧 Fixed
+- Removed the private `@ali/qoder-agent-sdk` install-time dependency so opencode can auto-install the plugin from npm without hitting a 404
+- Kept the vendored SDK as the runtime source of truth, matching the documented zero-config packaging model
+
+### 📦 Packaging
+- Added an explicit npm `files` whitelist so published tarballs only include the plugin entrypoints, runtime sources, vendored SDK, README, and license
+- Updated `package-lock.json` to match the publishable dependency graph
+
+### 📝 Documentation
+- Corrected installation guidance to reflect opencode's startup-time npm plugin installation flow
+
+### ✅ Testing
+- Added manifest and README regression tests covering the public install path and the no-private-dependency packaging rule
+
+---
+
 ## [0.2.3] - 2026-03-23
 
 ### 🎉 Major Features
