@@ -9,12 +9,27 @@
 <a name="english"></a>
 ## English
 
+### Quick Start
+
+```bash
+# 1. Login to Qoder CLI
+qodercli login
+
+# 2. Install the opencode plugin
+opencode plugin opencode-qoder-auth
+
+# 3. Verify qoder models are available
+opencode models | grep qoder
+```
+
+If the last command prints `qoder/...` models, the plugin has already injected the `qoder` provider and model definitions for you. No manual `provider.qoder` config is needed.
+
 ### Prerequisites
 
 #### 1. Install & login to Qoder CLI
 
 ```bash
-qoder login
+qodercli login
 ```
 
 This opens a browser for OAuth. Credentials are stored at `~/.qoder/.auth/user`.
@@ -82,7 +97,7 @@ opencode -m qoder/auto
 
 ### Auth
 
-The plugin reads `~/.qoder/.auth/user` to detect login state. If not logged in, opencode will show a prompt: *"Run `qoder login` in your terminal to authenticate"*.
+The plugin reads `~/.qoder/.auth/user` to detect login state. If not logged in, opencode will show a prompt: *"Run `qodercli login` in your terminal to authenticate"*.
 
 ---
 
@@ -109,7 +124,7 @@ The plugin reads `~/.qoder/.auth/user` to detect login state. If not logged in, 
 
 | Problem | Solution |
 |---------|----------|
-| Auth prompt at startup | Run `qoder login`, then restart opencode |
+| Auth prompt at startup | Run `qodercli login`, then restart opencode |
 | `qodercli not found` | Install Qoder CLI; `~/.qoder/bin/qodercli/` must exist |
 | Model not found | Verify model ID matches the table above |
 
@@ -124,12 +139,27 @@ MIT — see [LICENSE](./LICENSE)
 <a name="中文"></a>
 ## 中文
 
+### 快速开始
+
+```bash
+# 1. 先登录 qoder-cli
+qodercli login
+
+# 2. 安装 opencode 插件
+opencode plugin opencode-qoder-auth
+
+# 3. 验证 qoder 模型已注入
+opencode models | grep qoder
+```
+
+如果最后一条命令能输出 `qoder/...` 模型，说明插件已经自动注入 `qoder` provider 和模型定义，不需要手写 `provider.qoder` 配置。
+
 ### 前置条件
 
 #### 1. 安装并登录 Qoder CLI
 
 ```bash
-qoder login
+qodercli login
 ```
 
 会打开浏览器进行 OAuth 认证，凭证存储在 `~/.qoder/.auth/user`。
@@ -195,7 +225,7 @@ opencode -m qoder/auto
 
 ### 认证说明
 
-插件通过检查 `~/.qoder/.auth/user` 判断登录状态。若未登录，opencode 会弹出提示：*先在终端运行 `qoder login`*。
+插件通过检查 `~/.qoder/.auth/user` 判断登录状态。若未登录，opencode 会弹出提示：*先在终端运行 `qodercli login`*。
 
 ---
 
@@ -222,7 +252,7 @@ opencode -m qoder/auto
 
 | 问题 | 解决方法 |
 |------|---------|
-| 启动时弹出 auth 提示 | 运行 `qoder login`，重启 opencode |
+| 启动时弹出 auth 提示 | 运行 `qodercli login`，重启 opencode |
 | `qodercli not found` | 安装 Qoder CLI，确保 `~/.qoder/bin/qodercli/` 存在 |
 | 模型找不到 | 检查模型 ID 是否与上表一致 |
 
