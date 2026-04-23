@@ -15,8 +15,8 @@
 # 1. Login to Qoder CLI
 qodercli login
 
-# 2. Install the opencode plugin
-opencode plugin opencode-qoder-auth
+# 2. Install the opencode plugin (global)
+opencode plugin -g opencode-qoder-auth
 
 # 3. Verify qoder models are available
 opencode models | grep qoder
@@ -145,8 +145,8 @@ MIT — see [LICENSE](./LICENSE)
 # 1. 先登录 qoder-cli
 qodercli login
 
-# 2. 安装 opencode 插件
-opencode plugin opencode-qoder-auth
+# 2. 安装 opencode 插件 (全局)
+opencode plugin -g opencode-qoder-auth
 
 # 3. 验证 qoder 模型已注入
 opencode models | grep qoder
