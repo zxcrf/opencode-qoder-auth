@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2026-04-23
+
+### 🔧 Fixed
+- Published a clean follow-up release for fresh-environment validation after the npm install-path repair in `0.2.4`
+
+### ✅ Verification
+- Re-validated the public package shape and the opencode auto-discovery path before release
+
+---
+
 ## [0.2.4] - 2026-04-23
 
 ### 🔧 Fixed

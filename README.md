@@ -29,6 +29,10 @@ npm install -g opencode-ai
 
 ### Installation
 
+When you run opencode inside this repository, the repo-local plugin entry at `.opencode/plugins/qoder-auth.ts` is auto-discovered, so `opencode models qoder` works without extra setup.
+
+For normal end users outside this repository, OpenCode installs npm plugins automatically on startup from the `plugin` array below.
+
 Dependencies are fully vendored for Qoder SDK access, so `npm install`, `pnpm install`, and `bun install` should not need to fetch `@ali/qoder-agent-sdk` from the public npm registry.
 
 Add to your `~/.config/opencode/opencode.json`:
@@ -139,6 +143,10 @@ npm install -g opencode-ai
 ---
 
 ### 安装
+
+如果你是在这个仓库目录里直接运行 opencode，仓库自带的 `.opencode/plugins/qoder-auth.ts` 会被自动发现，因此 `opencode models qoder` 不需要额外配置就能工作。
+
+如果你是在仓库外作为普通用户使用，OpenCode 会在启动时按下面的 `plugin` 数组自动安装 npm 插件。
 
 在 `~/.config/opencode/opencode.json` 中添加：
 
