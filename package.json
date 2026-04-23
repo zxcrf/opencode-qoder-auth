@@ -1,21 +1,21 @@
 {
   "name": "opencode-qoder-auth",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "opencode auth plugin — Qoder AI models with bundled SDK, zero config required",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "files": [
-    "index.ts",
-    "provider.ts",
-    "src/",
+    "dist/",
     "README.md",
     "LICENSE"
   ],
   "exports": {
-    ".": "./index.ts",
-    "./provider": "./provider.ts"
+    ".": "./dist/index.js",
+    "./provider": "./dist/provider.js"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/src/vendor && cp src/vendor/qoder-agent-sdk.mjs dist/src/vendor/qoder-agent-sdk.mjs && cp src/vendor/qoder-agent-sdk.d.ts dist/src/vendor/qoder-agent-sdk.d.ts",
+    "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "vendor:patch-sdk": "node ./scripts/patch-qoder-agent-sdk.mjs"
@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.4.5",
+    "typescript": "^6.0.3",
     "vitest": "^4.0.15"
   },
   "author": "zxcrf",
@@ -45,9 +46,5 @@
   ],
   "engines": {
     "node": ">=20.0.0"
-  },
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org",
-    "access": "public"
   }
 }

@@ -7,8 +7,11 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const QoderProviderPlugin: Plugin = async () => {
-  // 解析 provider.ts 的 file:// URL，opencode 识别 file:// 前缀后直接 import
-  const providerFileUrl = new URL('./provider.ts', import.meta.url).href
+  // 发布包使用 dist/provider.js；源码直跑时回退到同目录 provider.ts。
+  const providerFileUrl = new URL(
+    existsSync(new URL('./provider.js', import.meta.url)) ? './provider.js' : './provider.ts',
+    import.meta.url,
+  ).href
 
   return {
     async config(config) {
