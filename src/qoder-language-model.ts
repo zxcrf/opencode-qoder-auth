@@ -511,6 +511,12 @@ export class QoderLanguageModel implements LanguageModelV2 {
     stream: ReadableStream<LanguageModelV2StreamPart>
   }> {
     const cliPath = resolveQoderCLI()
+    if (!cliPath) {
+      throw new Error(
+        'Qoder CLI not found. Please install Qoder CLI first. ' +
+          'Reference: https://github.com/opencode-ai/opencode-qoder-auth#prerequisites',
+      )
+    }
     const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath, this.providerOptions)
     const prompt = buildPromptFromOptions(options, qoderOptions.sessionId)
 

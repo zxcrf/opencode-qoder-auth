@@ -2,7 +2,7 @@ import type { Plugin, Hooks } from '@opencode-ai/plugin'
 import { QODER_MODELS } from './src/models.js'
 import { setMcpBridgeServers } from './src/mcp-bridge.js'
 import { setAvailableAgentTypes } from './src/agent-bridge.js'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -99,6 +99,15 @@ export const QoderProviderPlugin: Plugin = async () => {
           // 没有需要用户填写的字段
           prompts: [],
           async authorize() {
+            // 首先检查 qodercli 是否安装，未安装直接报错提示
+            const hasQoderCLI = checkQoderCLI()
+            if (!hasQoderCLI) {
+              return {
+                type: 'failed',
+                message: 'Qoder CLI not found. Please install Qoder CLI first. Reference: https://github.com/opencode-ai/opencode-qoder-auth#prerequisites',
+              }
+            }
+
             const authFiles = [
               join(homedir(), '.qoderwork', '.auth', 'user'),
               join(homedir(), '.qoder', '.auth', 'user'),
@@ -252,4 +261,34 @@ function detectOhMyOpencodeSlimTypes(config: Record<string, unknown>): string[] 
   }
 
   return []
+}
+
+function checkQoderCLI(): boolean {
+  // 1. PATH
+  const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')
+  for (const dir of pathDirs) {
+    const p = join(dir, process.platform === 'win32' ? 'qodercli.exe' : 'qodercli')
+    if (existsSync(p)) return true
+  }
+  // 2. Default paths
+  const home = homedir()
+  const paths = [
+    join(home, '.qoder', 'local', 'qodercli'),
+    join(home, '.qoder', 'local', 'qodercli.exe'),
+  ]
+  if (paths.some(existsSync)) return true
+
+  // 3. Versioned bin dir: ~/.qoder/bin/qodercli/qodercli-<version>
+  const binDir = join(home, '.qoder', 'bin', 'qodercli')
+  if (existsSync(binDir)) {
+    try {
+      // Just check if there are any files starting with qodercli-
+      const files = readdirSync(binDir)
+      if (files.some((f: string) => f.startsWith('qodercli-'))) return true
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return false
 }

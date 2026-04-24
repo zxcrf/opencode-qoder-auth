@@ -9,6 +9,8 @@
 <a name="english"></a>
 ## English
 
+> **Important:** This plugin requires the **Qoder CLI** to be installed on your system. It acts as the underlying engine for model interaction and authentication.
+
 ### Quick Start
 
 ```bash
@@ -138,6 +140,8 @@ MIT — see [LICENSE](./LICENSE)
 
 <a name="中文"></a>
 ## 中文
+
+> **重要提示：** 本插件依赖于系统已安装的 **Qoder CLI**。它是模型交互与身份认证的基础引擎。
 
 ### 快速开始
 
