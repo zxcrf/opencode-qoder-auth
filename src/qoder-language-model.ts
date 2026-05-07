@@ -102,21 +102,44 @@ function installSdkLogFilter(): void {
 // 模块加载即生效
 installSdkLogFilter()
 
+// ── 将纯文本 prompt 包装为 streaming 模式 ──────────────────────────────────────
+// 避免 --print 参数过长导致 Windows ENAMETOOLONG（命令行限制 ~32767 字符）
+function wrapStringAsStream(prompt: string, sessionId?: string): AsyncIterable<{ type: string; session_id: string; message: { role: string; content: Array<{ type: string; text: string }> }; parent_tool_use_id: null }> {
+  async function* toStream() {
+    yield {
+      type: 'user',
+      session_id: sessionId ?? 'default',
+      message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+      parent_tool_use_id: null as const,
+    }
+  }
+  return toStream()
+}
+
 // ── qodercli 二进制路径解析 ───────────────────────────────────────────────────
 
 function resolveQoderCLI(): string | undefined {
+  const isWin = process.platform === 'win32'
+  // Windows 上优先搜 .exe，再 .cmd；Unix 搜无后缀
+  const candidates = isWin ? ['qodercli.exe', 'qodercli.cmd', 'qodercli'] : ['qodercli']
   // 1. 全局 PATH 里的 qodercli（用户自行安装，优先）
   const pathDirs = (process.env.PATH ?? '').split(path.delimiter)
-  for (const dir of pathDirs) {
-    const p = path.join(dir, 'qodercli')
-    if (fs.existsSync(p)) return p
+  for (const name of candidates) {
+    for (const dir of pathDirs) {
+      const p = path.join(dir, name)
+      if (fs.existsSync(p)) return p
+    }
   }
-
-  // 2. SDK 默认本地安装路径：~/.qoder/local/qodercli
+  // 2. npm 全局包内嵌的真实二进制（Windows 特有）
+  if (isWin) {
+    const npmPrefix = path.join(os.homedir(), 'AppData', 'Roaming', 'npm')
+    const embedded = path.join(npmPrefix, 'node_modules', '@qoder-ai', 'qodercli', 'bin', 'qodercli.exe')
+    if (fs.existsSync(embedded)) return embedded
+  }
+  // 3. SDK 默认本地安装路径：~/.qoder/local/qodercli
   const localCli = path.join(os.homedir(), '.qoder', 'local', 'qodercli')
   if (fs.existsSync(localCli)) return localCli
-
-  // 3. 回退：~/.qoder/bin/qodercli/qodercli-<version>（取最新版本）
+  // 4. 回退：~/.qoder/bin/qodercli/qodercli-<version>（取最新版本）
   const binDir = path.join(os.homedir(), '.qoder', 'bin', 'qodercli')
   if (fs.existsSync(binDir)) {
     try {
@@ -603,8 +626,9 @@ export class QoderLanguageModel implements LanguageModelV2 {
         let suppressFurtherAssistantContent = false
 
         try {
-          // query() 是单次查询的最优路径（QoderAgentSDKClient 是双向交互会话，每次 connect() 冷启动更慢）
-          const qoderQuery = query({ prompt, options: { ...qoderOptions, abortController } })
+          // 强制 streaming 模式：纯文本 prompt 通过 stdin 传递，避免 --print 参数过长导致 Windows ENAMETOOLONG
+          const streamPrompt = typeof prompt === 'string' ? wrapStringAsStream(prompt, qoderOptions.sessionId) : prompt
+          const qoderQuery = query({ prompt: streamPrompt, options: { ...qoderOptions, abortController } })
           qoderQueryRef = qoderQuery
           let sdkMsgCount = 0
           for await (const msg of qoderQuery) {
