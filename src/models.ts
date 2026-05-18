@@ -75,7 +75,7 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   q35model_preview: {
     id: 'q35model_preview',
-    name: 'Qwen3.6-plus-preview (0x)',
+    name: 'Qwen3.6-Plus (0.2x)',
     attachment: true,
     reasoning: false,
     temperature: false,
@@ -85,7 +85,7 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   qmodel: {
     id: 'qmodel',
-    name: 'Qwen-Coder-Qoder-1.0 (0.2x)',
+    name: 'DeepSeek-V4-Pro (0.5x)',
     attachment: true,
     reasoning: false,
     temperature: false,
@@ -95,7 +95,7 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   q35model: {
     id: 'q35model',
-    name: 'Qwen3.5-Plus (0.2x)',
+    name: 'DeepSeek-V4-Flash (0.1x)',
     attachment: true,
     reasoning: false,
     temperature: false,
@@ -105,7 +105,7 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   gmodel: {
     id: 'gmodel',
-    name: 'GLM-5 (0.5x)',
+    name: 'GLM-5.1 (0.6x)',
     attachment: true,
     reasoning: false,
     temperature: false,
@@ -115,7 +115,7 @@ export const QODER_MODELS: Record<string, QoderModelDefinition> = {
   },
   kmodel: {
     id: 'kmodel',
-    name: 'Kimi-K2.5 (0.3x)',
+    name: 'Kimi-K2.6 (0.3x)',
     attachment: true,
     reasoning: false,
     temperature: false,

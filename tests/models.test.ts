@@ -4,9 +4,19 @@ import { QODER_MODELS, getModelById, DEFAULT_MODEL_ID } from '../src/models.js'
 describe('Qoder 模型定义', () => {
   it('QODER_MODELS 包含所有可用模型', () => {
     const expectedKeys = ['auto', 'efficient', 'performance', 'ultimate', 'lite', 'q35model_preview', 'qmodel', 'q35model', 'gmodel', 'kmodel', 'mmodel']
+    expect(Object.keys(QODER_MODELS)).toEqual(expectedKeys)
     for (const key of expectedKeys) {
       expect(QODER_MODELS[key], `缺少模型: ${key}`).toBeDefined()
     }
+  })
+
+  it('最新模型映射到当前 provider key', () => {
+    expect(QODER_MODELS.q35model_preview?.name).toBe('Qwen3.6-Plus (0.2x)')
+    expect(QODER_MODELS.qmodel?.name).toBe('DeepSeek-V4-Pro (0.5x)')
+    expect(QODER_MODELS.q35model?.name).toBe('DeepSeek-V4-Flash (0.1x)')
+    expect(QODER_MODELS.gmodel?.name).toBe('GLM-5.1 (0.6x)')
+    expect(QODER_MODELS.kmodel?.name).toBe('Kimi-K2.6 (0.3x)')
+    expect(QODER_MODELS.mmodel?.name).toBe('MiniMax-M2.7 (0.2x)')
   })
 
   it('每个模型有必要字段', () => {

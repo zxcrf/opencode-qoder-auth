@@ -9,7 +9,7 @@ opencode-qoder-auth/
 ├── index.ts                     # Plugin entry — config hook + auth hook
 ├── provider.ts                  # Exports createQoderProvider() (opencode npm loader entry)
 ├── src/
-│   ├── models.ts                # 10 built-in model definitions (injected by config hook)
+│   ├── models.ts                # 11 built-in model definitions (injected by config hook)
 │   ├── qoder-language-model.ts  # LanguageModelV2 implementation (doGenerate + doStream)
 │   ├── prompt-builder.ts        # AI SDK CallOptions → Qoder prompt / multimodal builder
 │   └── vendor/
@@ -33,6 +33,8 @@ opencode-qoder-auth/
 
 ## How the Streaming Pipeline Works
 
+Default SDK mode:
+
 ```
 opencode → QoderLanguageModel.doStream()
   → buildPromptFromOptions()   # text or multimodal (base64 image)
@@ -41,6 +43,15 @@ opencode → QoderLanguageModel.doStream()
       ├─ stream_event path     # incremental text / tool-input deltas (preferred)
       └─ assistant path        # full-block fallback
   → ReadableStream<V2StreamPart>
+```
+
+CLI prompt mode (`provider.qoder.options.mode = "cli"`):
+
+```
+opencode → QoderLanguageModel.doStream()
+  → buildPromptFromOptions()   # text only
+  → qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>
+  → stdout as a single text result
 ```
 
 ## Development
@@ -91,10 +102,11 @@ After editing `src/models.ts`, also update the model table in `README.md` (both 
 | `performance` | Performance (1.1x) | 180K | 32768 | ✓ | ✗ |
 | `efficient` | Efficient (0.3x) | 180K | 32768 | ✓ | ✗ |
 | `lite` | Lite (free) | 180K | 32768 | ✗ | ✗ |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32768 | ✓ | ✗ |
-| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32768 | ✓ | ✗ |
-| `gmodel` | GLM-5 (0.5x) | 180K | 32768 | ✓ | ✗ |
-| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32768 | ✓ | ✗ |
+| `q35model_preview` | Qwen3.6-Plus (0.2x) | 180K | 32768 | ✓ | ✗ |
+| `qmodel` | DeepSeek-V4-Pro (0.5x) | 180K | 32768 | ✓ | ✗ |
+| `q35model` | DeepSeek-V4-Flash (0.1x) | 180K | 32768 | ✓ | ✗ |
+| `gmodel` | GLM-5.1 (0.6x) | 180K | 32768 | ✓ | ✗ |
+| `kmodel` | Kimi-K2.6 (0.3x) | 180K | 32768 | ✓ | ✗ |
 | `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32768 | ✓ | ✗ |
 
 ---

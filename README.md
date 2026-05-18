@@ -77,6 +77,22 @@ opencode run -m qoder/auto "explain async/await"
 opencode -m qoder/auto
 ```
 
+For one-shot prompt execution through `qodercli` instead of the SDK streaming path, set the provider option:
+
+```json
+{
+  "provider": {
+    "qoder": {
+      "options": {
+        "mode": "cli"
+      }
+    }
+  }
+}
+```
+
+In CLI mode the plugin runs `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>` and returns the command stdout as the assistant response.
+
 ---
 
 ### Available Models
@@ -88,11 +104,11 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
-| `q35model_preview` | Qwen3.6-plus-preview (0x) | 180K | 32K | ✓ | ✗ |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
-| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
-| `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
-| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32K | ✓ | ✗ |
+| `q35model_preview` | Qwen3.6-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
+| `qmodel` | DeepSeek-V4-Pro (0.5x) | 180K | 32K | ✓ | ✗ |
+| `q35model` | DeepSeek-V4-Flash (0.1x) | 180K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5.1 (0.6x) | 180K | 32K | ✓ | ✗ |
+| `kmodel` | Kimi-K2.6 (0.3x) | 180K | 32K | ✓ | ✗ |
 | `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32K | ✓ | ✗ |
 
 ---
@@ -207,6 +223,22 @@ opencode run -m qoder/auto "解释 async/await"
 opencode -m qoder/auto
 ```
 
+如果只需要通过 `qodercli` 传入一个 prompt 并返回一次结果，可以设置 provider option：
+
+```json
+{
+  "provider": {
+    "qoder": {
+      "options": {
+        "mode": "cli"
+      }
+    }
+  }
+}
+```
+
+CLI 模式会执行 `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>`，并把命令 stdout 作为 assistant 响应返回。
+
 ---
 
 ### 可用模型
@@ -218,11 +250,11 @@ opencode -m qoder/auto
 | `efficient` | Efficient (0.3x) | 180K | 32K | ✓ | ✗ |
 | `performance` | Performance (1.1x) | 180K | 32K | ✓ | ✗ |
 | `ultimate` | Ultimate (1.6x) | 180K | 32K | ✓ | ✓ |
-| `q35model_preview` | Qwen3.6-plus-preview (0x) | 180K | 32K | ✓ | ✗ |
-| `qmodel` | Qwen-Coder-Qoder-1.0 (0.2x) | 180K | 32K | ✓ | ✗ |
-| `q35model` | Qwen3.5-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
-| `gmodel` | GLM-5 (0.5x) | 180K | 32K | ✓ | ✗ |
-| `kmodel` | Kimi-K2.5 (0.3x) | 180K | 32K | ✓ | ✗ |
+| `q35model_preview` | Qwen3.6-Plus (0.2x) | 180K | 32K | ✓ | ✗ |
+| `qmodel` | DeepSeek-V4-Pro (0.5x) | 180K | 32K | ✓ | ✗ |
+| `q35model` | DeepSeek-V4-Flash (0.1x) | 180K | 32K | ✓ | ✗ |
+| `gmodel` | GLM-5.1 (0.6x) | 180K | 32K | ✓ | ✗ |
+| `kmodel` | Kimi-K2.6 (0.3x) | 180K | 32K | ✓ | ✗ |
 | `mmodel` | MiniMax-M2.7 (0.2x) | 180K | 32K | ✓ | ✗ |
 
 ---

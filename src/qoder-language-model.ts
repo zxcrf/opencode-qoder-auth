@@ -13,6 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 
 import {
   configure,
@@ -23,33 +24,8 @@ import { buildPromptFromOptions } from './prompt-builder.js'
 import { getMcpBridgeServers } from './mcp-bridge.js'
 import { mapSubagentType } from './agent-bridge.js'
 
-// ── storageDir 解析 — 与 qodercli 行为对齐 ──────────────────────────────────
-// qodercli login 写入 ~/.qoder；QoderWork.app 写入 ~/.qoderwork。
-// 优先取最近更新的 auth/user 文件所在目录，保证 SDK 和 CLI 使用同一份 token。
-function resolveStorageDir(): string {
-  const candidates = [
-    path.join(os.homedir(), '.qoder'),
-    path.join(os.homedir(), '.qoderwork'),
-  ]
-  let best: string | undefined
-  let bestMtime = 0
-  for (const dir of candidates) {
-    const userFile = path.join(dir, '.auth', 'user')
-    try {
-      const stat = fs.statSync(userFile)
-      if (stat.mtimeMs > bestMtime) {
-        bestMtime = stat.mtimeMs
-        best = dir
-      }
-    } catch { /* file doesn't exist */ }
-  }
-  return best ?? path.join(os.homedir(), '.qoder')
-}
-
-// ── SDK 全局配置 — 不设 integrationMode（设置后服务端会按订阅类型鉴权） ──────
-configure({
-  storageDir: resolveStorageDir(),
-})
+// ── SDK 全局配置 — 不设 integrationMode/storageDir（新版 qodercli 不再接受 --storage-dir） ─
+configure({})
 
 // ── 调试日志 — 保存原始 stderr 引用，不受 SDK log filter 影响 ────────────────
 const _rawStderr = process.stderr.write.bind(process.stderr)
@@ -133,6 +109,57 @@ function resolveQoderCLI(): string | undefined {
     } catch { /* ignore */ }
   }
   return undefined
+}
+
+function resolveQoderCLIForSDK(cliPath: string): string {
+  return ensureQoderCLICompatWrapper(cliPath)
+}
+
+function ensureQoderCLICompatWrapper(cliPath: string): string {
+  const wrapperDir = path.join(os.tmpdir(), 'opencode-qoder-auth')
+  const wrapperPath = path.join(wrapperDir, 'qodercli-compat')
+  const script = `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const cli = process.env.QODER_REAL_CLI;
+if (!cli) {
+  console.error('QODER_REAL_CLI is not set');
+  process.exit(127);
+}
+const input = process.argv.slice(2);
+const output = [];
+for (let i = 0; i < input.length; i += 1) {
+  const arg = input[i];
+  if (arg === '--verbose') continue;
+  if (arg === '--storage-dir' || arg === '--resource-dir') {
+    i += 1;
+    continue;
+  }
+  output.push(arg);
+}
+const result = spawnSync(cli, output, {
+  stdio: 'inherit',
+  env: process.env,
+  cwd: process.cwd(),
+});
+if (result.error) {
+  console.error(result.error.message);
+  process.exit(result.error.code === 'ENOENT' ? 127 : 1);
+}
+process.exit(result.status ?? (result.signal ? 1 : 0));
+`
+
+  try {
+    fs.mkdirSync(wrapperDir, { recursive: true })
+    const current = fs.existsSync(wrapperPath) ? fs.readFileSync(wrapperPath, 'utf8') : ''
+    if (current !== script) {
+      fs.writeFileSync(wrapperPath, script, { mode: 0o755 })
+    } else {
+      fs.chmodSync(wrapperPath, 0o755)
+    }
+  } catch {
+    return cliPath
+  }
+  return wrapperPath
 }
 
 // ── 工具名称标准化 ────────────────────────────────────────────────────────────
@@ -290,6 +317,8 @@ type QoderMcpServerConfig =
   | { type: 'sdk'; name: string; instance: unknown }
 
 type QoderProviderOptions = {
+  /** sdk: use vendored SDK stream pipeline; cli: call qodercli once with -p and return stdout */
+  mode?: 'sdk' | 'cli'
   mcpServers?: Record<string, unknown>
   /** 透传到 SDK query options 的额外 CLI 参数；值为 null 表示仅传 flag 不带值 */
   extraArgs?: Record<string, string | null>
@@ -307,6 +336,7 @@ function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
   modelId: string,
   cliPath?: string,
+  realCliPath?: string,
   defaultProviderOptions?: QoderProviderOptions,
 ): {
   model: string
@@ -321,10 +351,7 @@ function buildQoderQueryOptions(
   mcpServers?: Record<string, QoderMcpServerConfig>
   extraArgs?: Record<string, string | null>
 } {
-  const providerOptions = {
-    ...(defaultProviderOptions ?? {}),
-    ...(getQoderProviderOptions(options.providerOptions) ?? {}),
-  }
+  const providerOptions = mergeQoderProviderOptions(options, defaultProviderOptions)
 
   // 双轨 MCP 策略：CLI 和 opencode 各自独立连接 MCP servers
   // CLI 通过 mcp__{server}__{tool} 格式调用，opencode 通过 {server}_{tool} 格式调用
@@ -353,20 +380,184 @@ function buildQoderQueryOptions(
     maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
     sessionId: randomUUID(),
     cwd: process.cwd(),
-    env: buildQoderQueryEnv(),
+    env: buildQoderQueryEnv(realCliPath),
     ...(cliPath ? { pathToQoderCLIExecutable: cliPath } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
     ...(hasExtraArgs ? { extraArgs: baseExtraArgs } : {}),
   }
 }
 
-function buildQoderQueryEnv(): Record<string, string> {
+function mergeQoderProviderOptions(
+  options: LanguageModelV2CallOptions,
+  defaultProviderOptions?: QoderProviderOptions,
+): QoderProviderOptions {
+  return {
+    ...(defaultProviderOptions ?? {}),
+    ...(getQoderProviderOptions(options.providerOptions) ?? {}),
+  }
+}
+
+function buildQoderQueryEnv(cliPath?: string): Record<string, string> {
   const env = { ...process.env }
   delete env.OPENCODE
   delete env.OPENCODE_PID
+  if (cliPath) env.QODER_REAL_CLI = cliPath
   return Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
   )
+}
+
+function buildCliPromptArgs(modelId: string, prompt: string): string[] {
+  return [
+    '--model', modelId,
+    '--dangerously-skip-permissions',
+    '--print',
+    '-p', prompt,
+  ]
+}
+
+function runQoderCLIOnce({
+  cliPath,
+  modelId,
+  prompt,
+  signal,
+}: {
+  cliPath: string
+  modelId: string
+  prompt: string
+  signal?: AbortSignal
+}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cliPath, buildCliPromptArgs(modelId, prompt), {
+      cwd: process.cwd(),
+      env: buildQoderQueryEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const cleanupAbortListener = () => {
+      signal?.removeEventListener('abort', abort)
+    }
+
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      cleanupAbortListener()
+      fn()
+    }
+
+    const abort = () => {
+      child.kill()
+      settle(() => reject(new Error('Qoder CLI request aborted')))
+    }
+
+    if (signal?.aborted) {
+      abort()
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', (err) => {
+      settle(() => reject(err))
+    })
+    child.on('close', (code, signalName) => {
+      settle(() => {
+        if (code === 0) {
+          resolve(stdout)
+          return
+        }
+        const detail = stderr.trim() || stdout.trim() || signalName || `exit code ${code ?? 'unknown'}`
+        reject(new Error(`Qoder CLI failed: ${detail}`))
+      })
+    })
+  })
+}
+
+function createQoderCliStream({
+  cliPath,
+  modelId,
+  prompt,
+  abortSignal,
+}: {
+  cliPath: string
+  modelId: string
+  prompt: string
+  abortSignal?: AbortSignal
+}): ReadableStream<LanguageModelV2StreamPart> {
+  const internalAbortController = new AbortController()
+  const abort = () => internalAbortController.abort()
+  let textStarted = false
+  let finished = false
+  let canceled = false
+
+  if (abortSignal) {
+    if (abortSignal.aborted) {
+      abort()
+    } else {
+      abortSignal.addEventListener('abort', abort, { once: true })
+    }
+  }
+
+  return new ReadableStream<LanguageModelV2StreamPart>({
+    start: async (controller) => {
+      controller.enqueue({ type: 'stream-start', warnings: [] })
+      try {
+        const text = await runQoderCLIOnce({
+          cliPath,
+          modelId,
+          prompt,
+          signal: internalAbortController.signal,
+        })
+        if (text.length > 0) {
+          textStarted = true
+          controller.enqueue({ type: 'text-start', id: '0' })
+          controller.enqueue({ type: 'text-delta', id: '0', delta: text })
+          controller.enqueue({ type: 'text-end', id: '0' })
+        }
+        controller.enqueue({
+          type: 'finish',
+          finishReason: decorateFinishReason('stop'),
+          usage: { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined },
+        })
+        finished = true
+        abortSignal?.removeEventListener('abort', abort)
+        controller.close()
+      } catch (err) {
+        if (internalAbortController.signal.aborted) {
+          finished = true
+          abortSignal?.removeEventListener('abort', abort)
+          if (!canceled) controller.close()
+          return
+        }
+        if (textStarted) controller.enqueue({ type: 'text-end', id: '0' })
+        controller.enqueue({
+          type: 'error',
+          error: err instanceof Error ? err : new Error(String(err)),
+        })
+        controller.enqueue({
+          type: 'finish',
+          finishReason: decorateFinishReason('error'),
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        })
+        finished = true
+        abortSignal?.removeEventListener('abort', abort)
+        controller.close()
+      }
+    },
+    cancel() {
+      canceled = true
+      if (!finished) abort()
+    },
+  })
 }
 
 function getQoderProviderOptions(
@@ -517,11 +708,29 @@ export class QoderLanguageModel implements LanguageModelV2 {
           'Reference: https://github.com/opencode-ai/opencode-qoder-auth#prerequisites',
       )
     }
-    const qoderOptions = buildQoderQueryOptions(options, this.modelId, cliPath, this.providerOptions)
+    const providerOptions = mergeQoderProviderOptions(options, this.providerOptions)
+    if (providerOptions.mode === 'cli') {
+      const prompt = buildPromptFromOptions(options)
+      if (typeof prompt !== 'string') {
+        throw new Error('Qoder CLI mode only supports text prompts')
+      }
+      debugLog(`doStream() using cli mode, modelId=${this.modelId}, cliPath=${cliPath}`)
+      return {
+        stream: createQoderCliStream({
+          cliPath,
+          modelId: this.modelId,
+          prompt,
+          abortSignal: options.abortSignal,
+        }),
+      }
+    }
+
+    const sdkCliPath = resolveQoderCLIForSDK(cliPath)
+    const qoderOptions = buildQoderQueryOptions(options, this.modelId, sdkCliPath, cliPath, this.providerOptions)
     const prompt = buildPromptFromOptions(options, qoderOptions.sessionId)
 
     const streamTraceId = randomUUID().slice(0, 8)
-    debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}`, streamTraceId)
+    debugLog(`doStream() called, modelId=${this.modelId}, cliPath=${cliPath}, sdkCliPath=${sdkCliPath}`, streamTraceId)
     debugLog(`doStream() prompt length=${typeof prompt === 'string' ? prompt.length : 'non-string'}`, streamTraceId)
     debugLog(`doStream() qoderOptions.mcpServers=[${Object.keys(qoderOptions.mcpServers ?? {}).join(',')}]`, streamTraceId)
 
@@ -955,6 +1164,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function createQoderProvider(options?: QoderProviderFactoryOptions): ProviderV2 {
   const providerOptions: QoderProviderOptions = {
+    ...(options?.mode === 'cli' || options?.mode === 'sdk' ? { mode: options.mode } : {}),
     ...(isRecord(options?.mcpServers) ? { mcpServers: options?.mcpServers } : {}),
     ...(isRecord(options?.extraArgs) ? { extraArgs: pickNullableStringRecord(options?.extraArgs) } : {}),
     ...(options?.experimentalMcpLoad === true ? { experimentalMcpLoad: true } : {}),

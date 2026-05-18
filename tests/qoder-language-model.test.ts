@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { EventEmitter } from 'node:events'
 import type {
   LanguageModelV2CallOptions,
   LanguageModelV2StreamPart,
@@ -27,6 +28,12 @@ const mockQueryFn = vi.fn((params: { prompt: unknown; options: unknown }) => {
   })()
 })
 
+const mockSpawnFn = vi.hoisted(() => vi.fn())
+
+vi.mock('node:child_process', () => ({
+  spawn: mockSpawnFn,
+}))
+
 vi.mock('../src/vendor/qoder-agent-sdk.mjs', () => ({
   configure: vi.fn(),
   IntegrationMode: { Quest: 'quest', QoderWork: 'qoder_work' },
@@ -44,6 +51,7 @@ describe('QoderLanguageModel', () => {
     lastQueryParams = null
     mockQueryError = null
     mockQueryFn.mockClear()
+    mockSpawnFn.mockReset()
     delete process.env.OPENCODE
     // 重置 mcp-bridge 全局状态，避免测试间污染
     const bridge = await import('../src/mcp-bridge.js')
@@ -157,6 +165,102 @@ describe('QoderLanguageModel', () => {
       expect(finish?.finishReason).toBe('error')
     })
 
+    it('mode=cli 时直接通过 qodercli -p 传入 prompt 并返回 stdout', async () => {
+      pushCliResult({ stdout: 'pong' })
+
+      const model = new QoderLanguageModel('lite')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: { mode: 'cli' },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(mockQueryFn).not.toHaveBeenCalled()
+      expect(mockSpawnFn).toHaveBeenCalledOnce()
+      const [, args, spawnOptions] = mockSpawnFn.mock.calls[0]
+      expect(args).toEqual(expect.arrayContaining(['--model', 'lite', '--dangerously-skip-permissions', '--print', '-p', 'ping']))
+      expect(args).not.toContain('--output-format')
+      expect(spawnOptions.cwd).toBe(process.cwd())
+
+      const deltas = parts.filter((p) => p.type === 'text-delta')
+      expect(deltas.map((p) => p.delta).join('')).toBe('pong')
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('stop')
+    })
+
+    it('mode=cli 时 qodercli 非 0 退出会发出 error finish', async () => {
+      pushCliResult({ stderr: 'qodercli failed', code: 2 })
+
+      const model = new QoderLanguageModel('lite')
+      const parts = await collectStream(
+        (
+          await model.doStream(
+            buildCallOptions('ping', {
+              providerOptions: {
+                qoder: { mode: 'cli' },
+              },
+            }),
+          )
+        ).stream,
+      )
+
+      expect(mockQueryFn).not.toHaveBeenCalled()
+      const error = parts.find((p) => p.type === 'error')
+      expect(error?.error.message).toContain('qodercli failed')
+      const finish = parts.find((p) => p.type === 'finish')
+      expect(finish?.finishReason).toBe('error')
+    })
+
+    it('createQoderProvider({ mode: "cli" }) 将 CLI 模式作为默认模式传给模型', async () => {
+      pushCliResult({ stdout: 'provider pong' })
+
+      const mod = await import('../src/qoder-language-model.js')
+      const provider = mod.createQoderProvider({ mode: 'cli' })
+      const model = provider.languageModel('lite')
+      const parts = await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      expect(mockQueryFn).not.toHaveBeenCalled()
+      expect(mockSpawnFn).toHaveBeenCalledOnce()
+      const deltas = parts.filter((p) => p.type === 'text-delta')
+      expect(deltas.map((p) => p.delta).join('')).toBe('provider pong')
+    })
+
+    it('mode=cli 时取消 reader 会终止 qodercli 子进程', async () => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        kill: ReturnType<typeof vi.fn>
+      }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.kill = vi.fn(() => {
+        queueMicrotask(() => child.emit('close', null, 'SIGTERM'))
+        return true
+      })
+      mockSpawnFn.mockReturnValueOnce(child)
+
+      const model = new QoderLanguageModel('lite')
+      const { stream } = await model.doStream(
+        buildCallOptions('ping', {
+          providerOptions: {
+            qoder: { mode: 'cli' },
+          },
+        }),
+      )
+      const reader = stream.getReader()
+      await reader.read()
+      await reader.cancel()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(child.kill).toHaveBeenCalled()
+    })
+
     it('stream 结束无 result 事件时，自动补 finish stop', async () => {
       pushTextDelta('hi')
       // 不推 result 事件
@@ -212,6 +316,31 @@ describe('QoderLanguageModel', () => {
 
       expect(lastQueryParams).toBeDefined()
       expect(lastQueryParams.options.model).toBe('ultimate')
+    })
+
+    it('使用兼容 wrapper 启动 qodercli，避免 vendored SDK 传递新版 CLI 不支持的旧参数', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('lite')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const cliPath = lastQueryParams?.options?.pathToQoderCLIExecutable
+      expect(typeof cliPath).toBe('string')
+      expect(cliPath).toContain('qodercli-compat')
+      expect(cliPath).not.toBe('/Users/qqz/.local/bin/qodercli')
+    })
+
+    it('兼容 wrapper 通过 QODER_REAL_CLI 指向真实 qodercli，避免递归调用自己', async () => {
+      pushSuccessResult()
+
+      const model = new QoderLanguageModel('lite')
+      await collectStream((await model.doStream(buildCallOptions('ping'))).stream)
+
+      const wrapperPath = lastQueryParams?.options?.pathToQoderCLIExecutable
+      const realCliPath = lastQueryParams?.options?.env?.QODER_REAL_CLI
+      expect(typeof realCliPath).toBe('string')
+      expect(realCliPath).not.toBe(wrapperPath)
+      expect(realCliPath).toMatch(/qodercli$/)
     })
 
     it('prompt 文本内容传递到 query()', async () => {
@@ -2654,6 +2783,35 @@ function pushSuccessResult() {
     subtype: 'success',
     is_error: false,
     usage: { input_tokens: 5, output_tokens: 10 },
+  })
+}
+
+function pushCliResult({
+  stdout = '',
+  stderr = '',
+  code = 0,
+}: {
+  stdout?: string
+  stderr?: string
+  code?: number
+}) {
+  mockSpawnFn.mockImplementationOnce(() => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter
+      stderr: EventEmitter
+      kill: ReturnType<typeof vi.fn>
+    }
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = vi.fn()
+
+    queueMicrotask(() => {
+      if (stdout) child.stdout.emit('data', Buffer.from(stdout))
+      if (stderr) child.stderr.emit('data', Buffer.from(stderr))
+      child.emit('close', code, null)
+    })
+
+    return child
   })
 }
 
