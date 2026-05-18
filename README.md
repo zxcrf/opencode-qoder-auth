@@ -6,6 +6,58 @@
 
 ---
 
+## Use This First / 先看这里
+
+> Normal use only needs the npm plugin name in `opencode.json`. You do **not** need to write a manual `provider.qoder` block.
+>
+> 默认使用只需要在 `opencode.json` 里添加 npm 插件名，**不需要**手写 `provider.qoder` 配置。
+
+### Default mode / 默认模式
+
+Login to Qoder CLI first / 先登录 Qoder CLI：
+
+```bash
+qodercli login
+```
+
+Add this to `~/.config/opencode/opencode.json` / 在 `~/.config/opencode/opencode.json` 中添加：
+
+```json
+{
+  "plugin": ["opencode-qoder-auth"]
+}
+```
+
+Then run any Qoder model through opencode / 然后直接使用 Qoder 模型：
+
+```bash
+opencode run -m qoder/lite "say hello"
+opencode -m qoder/auto
+```
+
+### One-shot CLI mode / 一次性 CLI 模式
+
+If you want `qodercli` semantics through opencode, use this config instead / 如果你想通过 opencode 获得 `qodercli` 一样的“一次 prompt、一次结果”行为，使用下面的配置：
+
+```json
+{
+  "plugin": ["opencode-qoder-auth"],
+  "provider": {
+    "qoder": {
+      "options": {
+        "mode": "cli"
+      }
+    }
+  }
+}
+```
+
+CLI mode makes the plugin call `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>` and return only stdout as the assistant response.
+
+CLI 模式会执行 `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>`，并只把 stdout 作为 assistant 结果返回。
+
+---
+
 <a name="english"></a>
 ## English
 
@@ -17,10 +69,9 @@
 # 1. Login to Qoder CLI
 qodercli login
 
-# 2. Install the opencode plugin (global)
-opencode plugin -g opencode-qoder-auth
+# 2. Add "opencode-qoder-auth" to ~/.config/opencode/opencode.json
 
-# 3. Verify qoder models are available
+# 3. Verify Qoder models are available
 opencode models | grep qoder
 ```
 
@@ -45,10 +96,6 @@ npm install -g opencode-ai
 ---
 
 ### Installation
-
-When you run opencode inside this repository, the repo-local plugin entry at `.opencode/plugins/qoder-auth.ts` is auto-discovered, so `opencode models qoder` works without extra setup.
-
-For normal end users outside this repository, OpenCode installs npm plugins automatically on startup from the `plugin` array below.
 
 Dependencies are fully vendored for Qoder SDK access, so `npm install`, `pnpm install`, and `bun install` should not need to fetch `@ali/qoder-agent-sdk` from the public npm registry.
 
@@ -81,6 +128,7 @@ For one-shot prompt execution through `qodercli` instead of the SDK streaming pa
 
 ```json
 {
+  "plugin": ["opencode-qoder-auth"],
   "provider": {
     "qoder": {
       "options": {
@@ -92,6 +140,8 @@ For one-shot prompt execution through `qodercli` instead of the SDK streaming pa
 ```
 
 In CLI mode the plugin runs `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>` and returns the command stdout as the assistant response.
+
+Default mode remains the SDK streaming pipeline. Use CLI mode when you specifically want one prompt in, one plain result out.
 
 ---
 
@@ -165,8 +215,7 @@ MIT — see [LICENSE](./LICENSE)
 # 1. 先登录 qoder-cli
 qodercli login
 
-# 2. 安装 opencode 插件 (全局)
-opencode plugin -g opencode-qoder-auth
+# 2. 在 ~/.config/opencode/opencode.json 里加入 "opencode-qoder-auth"
 
 # 3. 验证 qoder 模型已注入
 opencode models | grep qoder
@@ -193,10 +242,6 @@ npm install -g opencode-ai
 ---
 
 ### 安装
-
-如果你是在这个仓库目录里直接运行 opencode，仓库自带的 `.opencode/plugins/qoder-auth.ts` 会被自动发现，因此 `opencode models qoder` 不需要额外配置就能工作。
-
-如果你是在仓库外作为普通用户使用，OpenCode 会在启动时按下面的 `plugin` 数组自动安装 npm 插件。
 
 在 `~/.config/opencode/opencode.json` 中添加：
 
@@ -227,6 +272,7 @@ opencode -m qoder/auto
 
 ```json
 {
+  "plugin": ["opencode-qoder-auth"],
   "provider": {
     "qoder": {
       "options": {
@@ -238,6 +284,8 @@ opencode -m qoder/auto
 ```
 
 CLI 模式会执行 `qodercli --model <model> --dangerously-skip-permissions --print -p <prompt>`，并把命令 stdout 作为 assistant 响应返回。
+
+默认模式仍然是 SDK streaming 链路。只有当你明确想要“传入一个 prompt，只拿一次纯文本结果”时，才需要打开 CLI 模式。
 
 ---
 
