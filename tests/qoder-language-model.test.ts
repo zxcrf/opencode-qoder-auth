@@ -192,6 +192,13 @@ describe('QoderLanguageModel', () => {
       expect(deltas.map((p) => p.delta).join('')).toBe('pong')
       const finish = parts.find((p) => p.type === 'finish')
       expect(finish?.finishReason).toBe('stop')
+      expect(finish?.usage).toMatchObject({
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        reasoningTokens: 0,
+        cachedInputTokens: 0,
+      })
     })
 
     it('mode=cli 时 qodercli 非 0 退出会发出 error finish', async () => {

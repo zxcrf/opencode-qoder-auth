@@ -332,6 +332,10 @@ type QoderProviderFactoryOptions = QoderProviderOptions & {
 
 const DEFAULT_QODER_MAX_BUFFER_SIZE = 8 * 1024 * 1024
 
+function createZeroUsage(): LanguageModelV2Usage {
+  return { inputTokens: 0, outputTokens: 0, totalTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 }
+}
+
 function buildQoderQueryOptions(
   options: LanguageModelV2CallOptions,
   modelId: string,
@@ -526,7 +530,7 @@ function createQoderCliStream({
         controller.enqueue({
           type: 'finish',
           finishReason: decorateFinishReason('stop'),
-          usage: { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined },
+          usage: createZeroUsage(),
         })
         finished = true
         abortSignal?.removeEventListener('abort', abort)
@@ -546,7 +550,7 @@ function createQoderCliStream({
         controller.enqueue({
           type: 'finish',
           finishReason: decorateFinishReason('error'),
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          usage: createZeroUsage(),
         })
         finished = true
         abortSignal?.removeEventListener('abort', abort)
