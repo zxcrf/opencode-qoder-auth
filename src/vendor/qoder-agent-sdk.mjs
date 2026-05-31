@@ -560,16 +560,9 @@ Or provide the path via options:
    * Build CLI command with arguments
    */
   buildCommand() {
-    const cmd = [this.cliPath, "--output-format", "stream-json", "--verbose"];
+    const cmd = [this.cliPath, "--output-format", "stream-json"];
     const config = getConfig();
-    const storageDir = this.options.storageDir ?? config.storageDir;
-    if (storageDir) {
-      cmd.push("--storage-dir", storageDir);
-    }
-    const resourceDir = this.options.resourceDir ?? config.resourceDir;
-    if (resourceDir) {
-      cmd.push("--resource-dir", resourceDir);
-    }
+    // --storage-dir, --resource-dir, --verbose not supported by qodercli; removed for compatibility
     if (this.options.tools !== void 0) {
       if (Array.isArray(this.options.tools)) {
         if (this.options.tools.length === 0) {
@@ -584,23 +577,11 @@ Or provide the path via options:
     if (this.options.allowedTools && this.options.allowedTools.length > 0) {
       cmd.push("--allowed-tools", this.options.allowedTools.join(","));
     }
-    if (this.options.maxTurns !== void 0) {
-      cmd.push("--max-turns", String(this.options.maxTurns));
-    }
-    if (this.options.maxBudgetUsd !== void 0) {
-      cmd.push("--max-budget-usd", String(this.options.maxBudgetUsd));
-    }
     if (this.options.disallowedTools && this.options.disallowedTools.length > 0) {
       cmd.push("--disallowed-tools", this.options.disallowedTools.join(","));
     }
     if (this.options.model) {
       cmd.push("--model", this.options.model);
-    }
-    if (this.options.fallbackModel) {
-      cmd.push("--fallback-model", this.options.fallbackModel);
-    }
-    if (this.options.betas && this.options.betas.length > 0) {
-      cmd.push("--betas", this.options.betas.join(","));
     }
     if (this.options.permissionMode && this.options.permissionMode === "bypassPermissions") {
       cmd.push("--yolo");
@@ -610,9 +591,6 @@ Or provide the path via options:
     }
     if (this.options.resume) {
       cmd.push("--resume", this.options.resume);
-    }
-    if (this.options.resumeSessionAt) {
-      cmd.push("--resume-session-at", this.options.resumeSessionAt);
     }
     if (this.options.sessionId && !this.options.resume) {
       cmd.push("--session-id", this.options.sessionId);
@@ -640,11 +618,16 @@ Or provide the path via options:
         }
       }
       if (Object.keys(serversForCli).length > 0) {
-        cmd.push("--mcp-config", JSON.stringify({ mcpServers: serversForCli }));
-      }
-    }
-    if (this.options.includePartialMessages) {
-      cmd.push("--include-partial-messages");
+        const mcpJson = JSON.stringify({ mcpServers: serversForCli });
+        // Windows 命令行限制 ~32767 字符，超长时写入临时文件
+        if (mcpJson.length > 8000) {
+          const tmpFile = path2.join(os.tmpdir(), `qoder-mcp-${Date.now()}.json`);
+          fs.writeFileSync(tmpFile, mcpJson, 'utf-8');
+          this.tempFiles.push(tmpFile);
+          cmd.push("--mcp-config", tmpFile);
+        } else {
+          cmd.push("--mcp-config", mcpJson);
+        }
     }
     if (this.options.forkSession) {
       cmd.push("--fork-session");
@@ -681,12 +664,6 @@ Or provide the path via options:
           cmd.push(`--${flag}`, String(value));
         }
       }
-    }
-    if (this.options.maxThinkingTokens !== void 0) {
-      cmd.push("--max-thinking-tokens", String(this.options.maxThinkingTokens));
-    }
-    if (this.options.outputFormat && this.options.outputFormat.type === "json_schema") {
-      cmd.push("--json-schema", JSON.stringify(this.options.outputFormat.schema));
     }
     if (this.usePreparedNonStreaming) {
       for (const attachment of this.preparedAttachments) {
