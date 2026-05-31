@@ -4,7 +4,7 @@ import * as os from 'os';
 import { spawn, execFile } from 'child_process';
 import { createInterface } from 'readline';
 import * as net from 'net';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 
 var __filename = fileURLToPath(import.meta.url);
@@ -621,8 +621,8 @@ Or provide the path via options:
         const mcpJson = JSON.stringify({ mcpServers: serversForCli });
         // Windows 命令行限制 ~32767 字符，超长时写入临时文件
         if (mcpJson.length > 8000) {
-          const tmpFile = path2.join(os.tmpdir(), `qoder-mcp-${Date.now()}.json`);
-          fs.writeFileSync(tmpFile, mcpJson, 'utf-8');
+          const tmpFile = path2.join(os.tmpdir(), `qoder-mcp-${randomBytes(16).toString('hex')}.json`);
+          fs.writeFileSync(tmpFile, mcpJson, { encoding: 'utf-8', mode: 0o600 });
           this.tempFiles.push(tmpFile);
           cmd.push("--mcp-config", tmpFile);
         } else {
