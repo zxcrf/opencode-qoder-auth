@@ -376,7 +376,6 @@ function buildQoderQueryOptions(
   model: string
   allowDangerouslySkipPermissions: true
   permissionMode: 'bypassPermissions'
-  includePartialMessages: true
   maxBufferSize: number
   sessionId: string
   cwd: string
@@ -410,7 +409,6 @@ function buildQoderQueryOptions(
     model: modelId,
     allowDangerouslySkipPermissions: true,
     permissionMode: 'bypassPermissions',
-    includePartialMessages: true,
     maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
     sessionId: randomUUID(),
     cwd: process.cwd(),
