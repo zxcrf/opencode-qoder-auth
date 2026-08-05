@@ -135,6 +135,13 @@ function resolveQoderCLI(): string | undefined {
 }
 
 function resolveQoderCLIForSDK(cliPath: string): string {
+  // On Windows, use the real exe directly — the compat wrapper (shebang script
+  // `#!/usr/bin/env node`) can't be spawned by child_process on Windows.
+  // The wrapper only existed to strip --verbose/--storage-dir/--resource-dir,
+  // which are already removed in the vendored SDK's buildCommand().
+  if (process.platform === 'win32') {
+    return cliPath
+  }
   return ensureQoderCLICompatWrapper(cliPath)
 }
 
@@ -369,7 +376,6 @@ function buildQoderQueryOptions(
   model: string
   allowDangerouslySkipPermissions: true
   permissionMode: 'bypassPermissions'
-  includePartialMessages: true
   maxBufferSize: number
   sessionId: string
   cwd: string
@@ -403,7 +409,6 @@ function buildQoderQueryOptions(
     model: modelId,
     allowDangerouslySkipPermissions: true,
     permissionMode: 'bypassPermissions',
-    includePartialMessages: true,
     maxBufferSize: DEFAULT_QODER_MAX_BUFFER_SIZE,
     sessionId: randomUUID(),
     cwd: process.cwd(),

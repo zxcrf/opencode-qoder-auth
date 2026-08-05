@@ -28,5 +28,12 @@ export function setMcpBridgeServers(servers: Record<string, QoderMcpServerConfig
  * 由 qoder-language-model.ts buildQoderQueryOptions() 调用，获取桥接服务器配置。
  */
 export function getMcpBridgeServers(): Record<string, QoderMcpServerConfig> {
-  return bridgeServers
+  // Don't bridge OpenCode MCP servers to qodercli. The CLI process receives
+  // the full --mcp-config and attempts to connect to each server directly
+  // during startup. If a server (e.g. Docker container) is unreachable or
+  // slow to connect, qodercli blocks on the connection and never produces
+  // output beyond hook_started/hook_response — causing opencode to hang.
+  // OpenCode already handles MCP tools itself via the functionTools layer;
+  // duplicating the servers into qodercli is unnecessary.
+  return {}
 }
